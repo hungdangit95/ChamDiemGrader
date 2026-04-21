@@ -28,7 +28,9 @@ public static class ExcelReportWriter
             else
                 summary.Cell(r, 2).Value = "";
 
-            summary.Cell(r, 3).Value = row.ChiTietDiemVaLyDo ?? "";
+            summary.Cell(r, 3).Value = !row.HopLe
+                ? $"Lý do không hợp lệ: {row.LyDoKhongHopLe ?? "Không có mô tả."}"
+                : row.ChiTietDiemVaLyDo ?? "";
             summary.Cell(r, 3).Style.Alignment.WrapText = true;
             summary.Cell(r, 4).Value = row.NhanXetDatTu85 ?? "";
             summary.Cell(r, 4).Style.Alignment.WrapText = true;

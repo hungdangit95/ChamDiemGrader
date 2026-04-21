@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Security.Cryptography;
 using ChamDiemGrader.Models;
 
 namespace ChamDiemGrader.Services;
@@ -10,6 +11,9 @@ public sealed class GeminiGradingClient : IDisposable
     private const string GeminiApiBaseV1Beta = "https://generativelanguage.googleapis.com/v1beta/models";
     private const string GeminiApiBaseV1 = "https://generativelanguage.googleapis.com/v1/models";
     private readonly HttpClient _http;
+    private string? _cachedCriteriaKey;
+    private string? _cachedContentName;
+    private static string? _systemInstructionCache;
 
     private static readonly JsonSerializerOptions JsonReq = new()
     {
@@ -30,29 +34,29 @@ public sealed class GeminiGradingClient : IDisposable
 
     public async Task<GradeResult> GradeAsync(
         string fileName,
-        string criteriaPlainText,
         string essayPlainText,
         string apiKey,
         string model,
         CancellationToken cancellationToken = default)
     {
-        var compactCriteria = CompactWhitespace(criteriaPlainText);
+        var systemInstruction = GetSystemInstructionText();
         var essay = TrimEssay(CompactWhitespace(essayPlainText), maxChars: 120_000);
 
-        var systemPrompt =
-            "Bạn là giám khảo chấm bài viết tiếng Việt theo đúng thể lệ được cung cấp. " +
-            "Chỉ trả về một đối tượng JSON bắt đầu bằng ký tự {. Không markdown, không bọc trong ``` hay ```json, không tiền tố hay giải thích ngoài JSON.";
-
-        var userPrompt = BuildUserPrompt(compactCriteria, essay);
+        var userPrompt = BuildEssayOnlyPrompt(essay);
 
         var normalizedModel = NormalizeModelName(model);
+        await EnsureCriteriaCachedAsync(systemInstruction, apiKey, normalizedModel, cancellationToken).ConfigureAwait(false);
         var geminiBody = new Dictionary<string, object?>
         {
             ["systemInstruction"] = new Dictionary<string, object?>
             {
                 ["parts"] = new object[]
                 {
-                    new Dictionary<string, string> { ["text"] = systemPrompt }
+                    new Dictionary<string, string>
+                    {
+                        ["text"] =
+                            "Bạn là hệ thống chấm điểm bài viết dự thi. Chỉ trả về duy nhất một JSON object hợp lệ."
+                    }
                 }
             },
             ["contents"] = new object[]
@@ -72,6 +76,8 @@ public sealed class GeminiGradingClient : IDisposable
                 ["responseMimeType"] = "application/json"
             }
         };
+        if (!string.IsNullOrWhiteSpace(_cachedContentName))
+            geminiBody["cachedContent"] = _cachedContentName;
 
         var (respText, usedModel) = await SendGenerateContentWithFallbackAsync(
             apiKey, normalizedModel, geminiBody, cancellationToken).ConfigureAwait(false);
@@ -83,27 +89,122 @@ public sealed class GeminiGradingClient : IDisposable
                         ?? throw new InvalidOperationException("Gemini không trả nội dung.");
 
         var jsonPayload = ExtractJsonPayload(content);
+        using var payloadDoc = JsonDocument.Parse(jsonPayload);
+        var payloadRoot = payloadDoc.RootElement;
         var grading = JsonSerializer.Deserialize<GradingJson>(jsonPayload, JsonResp)
                       ?? throw new InvalidOperationException("Model không trả JSON hợp lệ: " + content);
-
-        var chiTietText = grading.HopLe
-            ? FormatChiTiet(grading.ChiTiet)
-            : null;
+        var hopLe = ResolveValidity(payloadRoot, grading);
+        var invalidReason = hopLe ? null : ResolveInvalidReason(grading, payloadRoot, jsonPayload);
+        var chiTietText = hopLe ? FormatChiTiet(grading.Scores) : null;
 
         return new GradeResult
         {
             FileName = fileName,
-            HopLe = grading.HopLe,
-            LyDoKhongHopLe = grading.LyDoNeuKhongHopLe,
-            TongDiem = grading.TongDiem,
-            PhanLoai = NormalizePhanLoai(grading.PhanLoai),
-            GhiChu = grading.GhiChuNgan,
+            HopLe = hopLe,
+            LyDoKhongHopLe = invalidReason,
+            TongDiem = hopLe ? (grading.FinalScore ?? TryGetNullableDouble(payloadRoot, "tong_diem")) : null,
+            PhanLoai = NormalizePhanLoai(grading.Grade),
+            GhiChu = grading.Feedback,
             ChiTietDiemVaLyDo = chiTietText,
-            NhanXetDatTu85 = ShouldIncludeHighScoreComment(grading.HopLe, grading.TongDiem)
-                ? NormalizeHighScoreComment(grading.NhanXet8_5Plus)
-                : null,
+            NhanXetDatTu85 = null,
             RawModelJson = $"{{\"used_model\":\"{usedModel}\",\"payload\":{jsonPayload}}}"
         };
+    }
+
+    private static string GetSystemInstructionText()
+    {
+        if (!string.IsNullOrWhiteSpace(_systemInstructionCache))
+            return _systemInstructionCache;
+
+        var path = ResolvePromptPath();
+        if (!File.Exists(path))
+            throw new FileNotFoundException("Không tìm thấy file system instruction.", path);
+
+        _systemInstructionCache = File.ReadAllText(path, Encoding.UTF8).Trim();
+        return _systemInstructionCache;
+    }
+
+    private static string ResolvePromptPath()
+    {
+        var dir = AppContext.BaseDirectory;
+        for (var i = 0; i < 8; i++)
+        {
+            var candidate = Path.Combine(dir, "Prompts", "system_instruction.vi.txt");
+            if (File.Exists(candidate))
+                return candidate;
+            var parent = Directory.GetParent(dir)?.FullName;
+            if (string.IsNullOrWhiteSpace(parent) || string.Equals(parent, dir, StringComparison.OrdinalIgnoreCase))
+                break;
+            dir = parent;
+        }
+
+        return Path.Combine(AppContext.BaseDirectory, "Prompts", "system_instruction.vi.txt");
+    }
+
+    private async Task EnsureCriteriaCachedAsync(
+        string compactCriteria,
+        string apiKey,
+        string model,
+        CancellationToken cancellationToken)
+    {
+        var key = BuildCriteriaCacheKey(apiKey, model, compactCriteria);
+        if (string.Equals(_cachedCriteriaKey, key, StringComparison.Ordinal) &&
+            !string.IsNullOrWhiteSpace(_cachedContentName))
+            return;
+
+        _cachedCriteriaKey = key;
+        _cachedContentName = null;
+
+        var contentName = await TryCreateCachedContentAsync(apiKey, model, compactCriteria, cancellationToken)
+            .ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(contentName))
+            _cachedContentName = contentName;
+    }
+
+    private static string BuildCriteriaCacheKey(string apiKey, string model, string criteria)
+    {
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(criteria)));
+        return $"{apiKey}:{model}:{hash}";
+    }
+
+    private async Task<string?> TryCreateCachedContentAsync(
+        string apiKey,
+        string model,
+        string compactCriteria,
+        CancellationToken cancellationToken)
+    {
+        var preamble = BuildCriteriaPreamble(compactCriteria);
+        var body = new Dictionary<string, object?>
+        {
+            ["model"] = $"models/{NormalizeModelName(model)}",
+            ["displayName"] = "criteria-cache",
+            ["ttl"] = "3600s",
+            ["contents"] = new object[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["role"] = "user",
+                    ["parts"] = new object[]
+                    {
+                        new Dictionary<string, string> { ["text"] = preamble }
+                    }
+                }
+            }
+        };
+
+        var endpoint = $"https://generativelanguage.googleapis.com/v1beta/cachedContents?key={Uri.EscapeDataString(apiKey)}";
+        using var req = new HttpRequestMessage(HttpMethod.Post, endpoint);
+        req.Content = new StringContent(JsonSerializer.Serialize(body, JsonReq), Encoding.UTF8, "application/json");
+
+        using var resp = await _http.SendAsync(req, cancellationToken).ConfigureAwait(false);
+        var text = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        if (!resp.IsSuccessStatusCode)
+            return null;
+
+        using var doc = JsonDocument.Parse(text);
+        if (!doc.RootElement.TryGetProperty("name", out var nameEl) || nameEl.ValueKind != JsonValueKind.String)
+            return null;
+        return nameEl.GetString();
     }
 
     private async Task<(string responseText, string usedModel)> SendGenerateContentWithFallbackAsync(
@@ -191,12 +292,42 @@ public sealed class GeminiGradingClient : IDisposable
         CancellationToken cancellationToken)
     {
         var endpoint = $"{apiBase}/{model}:generateContent?key={Uri.EscapeDataString(apiKey)}";
-        using var req = new HttpRequestMessage(HttpMethod.Post, endpoint);
-        req.Content = new StringContent(JsonSerializer.Serialize(body, JsonReq), Encoding.UTF8, "application/json");
+        var attempts = 0;
+        while (true)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            req.Content = new StringContent(JsonSerializer.Serialize(body, JsonReq), Encoding.UTF8, "application/json");
 
-        using var resp = await _http.SendAsync(req, cancellationToken).ConfigureAwait(false);
-        var text = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        return (resp.IsSuccessStatusCode, text, (int)resp.StatusCode);
+            using var resp = await _http.SendAsync(req, cancellationToken).ConfigureAwait(false);
+            var text = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            if (resp.IsSuccessStatusCode)
+                return (true, text, (int)resp.StatusCode);
+
+            var status = (int)resp.StatusCode;
+            if ((status == 429 || status == 503) && attempts < 6)
+            {
+                attempts++;
+                var delay = GetRetryDelay(resp, attempts);
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            return (false, text, status);
+        }
+    }
+
+    private static TimeSpan GetRetryDelay(HttpResponseMessage resp, int attempt)
+    {
+        if (resp.Headers.TryGetValues("Retry-After", out var values))
+        {
+            var retryAfter = values.FirstOrDefault();
+            if (int.TryParse(retryAfter, out var secs) && secs > 0)
+                return TimeSpan.FromSeconds(Math.Min(secs, 60));
+        }
+
+        var baseMs = Math.Min(1000 * (int)Math.Pow(2, attempt), 30_000);
+        var jitter = Random.Shared.Next(150, 900);
+        return TimeSpan.FromMilliseconds(baseMs + jitter);
     }
 
     private async Task<string?> TryResolveModelAsync(string apiKey, CancellationToken cancellationToken)
@@ -263,16 +394,6 @@ public sealed class GeminiGradingClient : IDisposable
         return m;
     }
 
-    private static bool ShouldIncludeHighScoreComment(bool hopLe, double? tongDiem)
-        => hopLe && tongDiem.HasValue && tongDiem.Value > 8.5;
-
-    private static string? NormalizeHighScoreComment(string? s)
-    {
-        if (string.IsNullOrWhiteSpace(s))
-            return null;
-        return s.Trim();
-    }
-
     /// <summary>Bỏ markdown ```json ... ``` và trích đối tượng JSON đầu tiên — model đôi khi bọc JSON trong fence.</summary>
     private static string ExtractJsonPayload(string raw)
     {
@@ -297,23 +418,102 @@ public sealed class GeminiGradingClient : IDisposable
         return s.Trim();
     }
 
-    private static string? FormatChiTiet(ChiTietItem[]? items)
+    private static bool ResolveValidity(JsonElement root, GradingJson grading)
     {
-        if (items == null || items.Length == 0)
+        if (TryGetNullableBool(root, "valid").HasValue)
+            return TryGetNullableBool(root, "valid")!.Value;
+        if (TryGetNullableBool(root, "hop_le").HasValue)
+            return TryGetNullableBool(root, "hop_le")!.Value;
+
+        if (TryGetNullableDouble(root, "final_score").HasValue ||
+            TryGetNullableDouble(root, "tong_diem").HasValue)
+            return true;
+
+        if (!string.IsNullOrWhiteSpace(grading.Reason))
+            return false;
+
+        // Khi model thiếu key valid/hop_le thì mặc định coi là hợp lệ
+        // để không gán nhầm "không hợp lệ" do sai schema.
+        return true;
+    }
+
+    private static string ResolveInvalidReason(GradingJson grading, JsonElement root, string jsonPayload)
+    {
+        var reason = FirstNonEmpty(
+            grading.Reason,
+            grading.Feedback);
+        if (!string.IsNullOrWhiteSpace(reason))
+            return reason!;
+
+        reason = FirstNonEmpty(
+            TryGetString(root, "reason"),
+            TryGetString(root, "ly_do_neu_khong_hop_le"),
+            TryGetString(root, "ly_do"),
+            TryGetString(root, "error"),
+            TryGetString(root, "message"),
+            TryGetString(root, "feedback"));
+        if (!string.IsNullOrWhiteSpace(reason))
+            return reason!;
+
+        var snippet = jsonPayload.Length > 200 ? jsonPayload[..200] + "..." : jsonPayload;
+        return $"Model không trả trường reason cho bài không hợp lệ (sai schema). Payload: {snippet}";
+    }
+
+    private static string? TryGetString(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var el))
+            return null;
+        return el.ValueKind == JsonValueKind.String ? el.GetString()?.Trim() : null;
+    }
+
+    private static bool? TryGetNullableBool(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var el))
+            return null;
+        return el.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.String when bool.TryParse(el.GetString(), out var b) => b,
+            _ => null
+        };
+    }
+
+    private static double? TryGetNullableDouble(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var el))
+            return null;
+        if (el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out var n))
+            return n;
+        if (el.ValueKind == JsonValueKind.String &&
+            double.TryParse(el.GetString(), out var s))
+            return s;
+        return null;
+    }
+
+    private static string? FirstNonEmpty(params string?[] values)
+        => values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v))?.Trim();
+
+    private static string? FormatChiTiet(ScoreGroups? scores)
+    {
+        if (scores == null)
             return null;
 
-        var lines = new List<string>();
-        foreach (var it in items)
+        var lines = new List<string>
         {
-            var ma = string.IsNullOrWhiteSpace(it.Ma) ? "?" : it.Ma!.Trim();
-            var ten = string.IsNullOrWhiteSpace(it.Ten) ? "" : $" ({it.Ten.Trim()})";
-            var max = it.DiemToiDa.HasValue ? $"/{FormatScore(it.DiemToiDa.Value)}" : "";
-            var score = it.DiemCham.HasValue ? FormatScore(it.DiemCham.Value) : "—";
-            var ly = string.IsNullOrWhiteSpace(it.LyDo) ? "" : it.LyDo.Trim();
-            lines.Add($"[{ma}{ten}] Điểm: {score}{max}. Lý do: {ly}");
-        }
-
-        return lines.Count > 0 ? string.Join(Environment.NewLine, lines) : null;
+            $"[1.1] {FormatScoreNullable(scores.Content?.S11)}",
+            $"[1.2] {FormatScoreNullable(scores.Content?.S12)}",
+            $"[1.3] {FormatScoreNullable(scores.Content?.S13)}",
+            $"[1.4] {FormatScoreNullable(scores.Content?.S14)}",
+            $"[1.5] {FormatScoreNullable(scores.Content?.S15)}",
+            $"[1.6] {FormatScoreNullable(scores.Content?.S16)}",
+            $"[1.7] {FormatScoreNullable(scores.Content?.S17)}",
+            $"[2.1] {FormatScoreNullable(scores.Creativity?.S21)}",
+            $"[2.2] {FormatScoreNullable(scores.Creativity?.S22)}",
+            $"[2.3] {FormatScoreNullable(scores.Creativity?.S23)}",
+            $"[3] {FormatScoreNullable(scores.Presentation)}"
+        };
+        return string.Join(Environment.NewLine, lines);
     }
 
     private static string FormatScore(double v)
@@ -322,6 +522,9 @@ public sealed class GeminiGradingClient : IDisposable
             return "—";
         return Math.Abs(v - Math.Round(v)) < 0.001 ? $"{(int)Math.Round(v)}" : $"{v:0.#}";
     }
+
+    private static string FormatScoreNullable(double? v)
+        => v.HasValue ? FormatScore(v.Value) : "—";
 
     private static string? NormalizePhanLoai(string? s)
     {
@@ -355,49 +558,25 @@ public sealed class GeminiGradingClient : IDisposable
         return s.Trim();
     }
 
-    private static string BuildUserPrompt(string criteriaPlainText, string essay)
+    private static string BuildEssayOnlyPrompt(string essay)
     {
-        const string jsonShape = """
-{
-  "hop_le": <boolean>,
-  "ly_do_neu_khong_hop_le": <string hoặc null>,
-  "tong_diem": <số từ 0 đến 10 hoặc null nếu không hợp lệ>,
-  "phan_loai": <một trong: "Trung binh"|"Kha"|"Gioi"|null>,
-  "ghi_chu_ngan": <string ngắn>,
-  "chi_tiet": <mảng có đúng 7 phần tử khi hop_le=true, hoặc [] khi hop_le=false>,
-  "nhan_xet_8_5_plus": <string nhiều dòng hoặc null>
-}
-
-Mỗi phần tử của "chi_tiet": { "ma": "1.1", "ten": "<tên hạng mục ngắn>", "diem_toi_da": <số>, "diem_cham": <số>, "ly_do": "<giải thích ngắn gọn>" }
-""";
-
         return $"""
-Áp dụng CHÍNH XÁC bộ tiêu chí sau (đã trích từ tài liệu chấm điểm):
-
----
-{criteriaPlainText}
----
-
-Nhiệm vụ:
-1) Xác định bài có thuộc trường hợp KHÔNG HỢP LỆ theo Bước 1 trong tiêu chí hay không.
-2) Nếu HỢP LỆ, chấm theo thang điểm Bước 2 (tối đa 10 điểm). Tổng các diem_cham trong chi_tiet phải khớp với tong_diem (sai số làm tròn tối đa 0.2). Phân loại theo Bước 3.
-3) Khi hop_le=true, trả về chi_tiet gồm ĐÚNG 7 hạng theo thang trong tiêu chí, theo thứ tự:
-   ma "1.1" (tối đa 3 điểm), "1.2" (tối đa 2), "2.1" (tối đa 1), "2.2" (tối đa 1), "2.3" (tối đa 1), "3" (tối đa 1), "4" (tối đa 1).
-   Điền "ten" theo đúng wording gần với bảng thang điểm trong tiêu chí.
-4) Khi hop_le=false: chi_tiet là mảng rỗng [], tong_diem null.
-5) Nếu hop_le=true và tong_diem > 8.5:
-   - "nhan_xet_8_5_plus" phải có nhận xét chi tiết kiểu ban giám khảo, gồm nhiều dòng dễ đọc.
-   - Mỗi ý nên có "Lý do:" và "Nhận xét:" ngắn gọn, cụ thể theo nội dung bài.
-   - Nếu tong_diem <= 8.5 hoặc không hợp lệ thì "nhan_xet_8_5_plus" = null.
-
-Trả về ĐÚNG một đối tượng JSON với các khóa sau (không thêm khóa ngoài schema). Ví dụ dạng cấu trúc (không copy số điểm mẫu):
-{jsonShape}
-
-Quy ước phan_loai khi hop_le=true: điểm < 5 -> "Trung binh"; 5 <= điểm <= 8 -> "Kha"; điểm > 8 -> "Gioi".
+Hãy chấm bài theo tiêu chí đã được cung cấp trong system instruction/cached content.
+Trả về đúng schema JSON đã yêu cầu, không markdown.
 
 Nội dung bài dự thi:
 ---
 {essay}
+---
+""";
+    }
+
+    private static string BuildCriteriaPreamble(string criteriaPlainText)
+    {
+        return $"""
+Bộ tiêu chí chấm điểm chính thức (nguồn tài liệu nội bộ):
+---
+{criteriaPlainText}
 ---
 """;
     }
@@ -407,42 +586,75 @@ Nội dung bài dự thi:
 
 internal sealed class GradingJson
 {
-    [JsonPropertyName("hop_le")]
-    public bool HopLe { get; set; }
+    [JsonPropertyName("valid")]
+    public bool Valid { get; set; }
 
-    [JsonPropertyName("ly_do_neu_khong_hop_le")]
-    public string? LyDoNeuKhongHopLe { get; set; }
+    [JsonPropertyName("reason")]
+    public string? Reason { get; set; }
 
-    [JsonPropertyName("tong_diem")]
-    public double? TongDiem { get; set; }
+    [JsonPropertyName("scores")]
+    public ScoreGroups? Scores { get; set; }
 
-    [JsonPropertyName("phan_loai")]
-    public string? PhanLoai { get; set; }
+    [JsonPropertyName("total_round_1")]
+    public double? TotalRound1 { get; set; }
 
-    [JsonPropertyName("ghi_chu_ngan")]
-    public string? GhiChuNgan { get; set; }
+    [JsonPropertyName("total_round_2")]
+    public double? TotalRound2 { get; set; }
 
-    [JsonPropertyName("chi_tiet")]
-    public ChiTietItem[]? ChiTiet { get; set; }
+    [JsonPropertyName("final_score")]
+    public double? FinalScore { get; set; }
 
-    [JsonPropertyName("nhan_xet_8_5_plus")]
-    public string? NhanXet8_5Plus { get; set; }
+    [JsonPropertyName("grade")]
+    public string? Grade { get; set; }
+
+    [JsonPropertyName("feedback")]
+    public string? Feedback { get; set; }
 }
 
-internal sealed class ChiTietItem
+internal sealed class ScoreGroups
 {
-    [JsonPropertyName("ma")]
-    public string? Ma { get; set; }
+    [JsonPropertyName("content")]
+    public ContentScores? Content { get; set; }
 
-    [JsonPropertyName("ten")]
-    public string? Ten { get; set; }
+    [JsonPropertyName("creativity")]
+    public CreativityScores? Creativity { get; set; }
 
-    [JsonPropertyName("diem_toi_da")]
-    public double? DiemToiDa { get; set; }
+    [JsonPropertyName("presentation")]
+    public double? Presentation { get; set; }
+}
 
-    [JsonPropertyName("diem_cham")]
-    public double? DiemCham { get; set; }
+internal sealed class ContentScores
+{
+    [JsonPropertyName("1.1")]
+    public double? S11 { get; set; }
 
-    [JsonPropertyName("ly_do")]
-    public string? LyDo { get; set; }
+    [JsonPropertyName("1.2")]
+    public double? S12 { get; set; }
+
+    [JsonPropertyName("1.3")]
+    public double? S13 { get; set; }
+
+    [JsonPropertyName("1.4")]
+    public double? S14 { get; set; }
+
+    [JsonPropertyName("1.5")]
+    public double? S15 { get; set; }
+
+    [JsonPropertyName("1.6")]
+    public double? S16 { get; set; }
+
+    [JsonPropertyName("1.7")]
+    public double? S17 { get; set; }
+}
+
+internal sealed class CreativityScores
+{
+    [JsonPropertyName("2.1")]
+    public double? S21 { get; set; }
+
+    [JsonPropertyName("2.2")]
+    public double? S22 { get; set; }
+
+    [JsonPropertyName("2.3")]
+    public double? S23 { get; set; }
 }

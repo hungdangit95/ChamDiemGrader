@@ -5,7 +5,8 @@ namespace ChamDiemGrader;
 
 public partial class Form1 : Form
 {
-    private readonly CriteriaCacheService _criteriaCache = new();
+    private const int RequestBatchSize = 25;
+    private static readonly TimeSpan BatchPause = TimeSpan.FromSeconds(4);
     private readonly GeminiGradingClient _gemini = new();
 
     public Form1()
@@ -60,17 +61,9 @@ public partial class Form1 : Form
 
     private async void BtnCham_Click(object? sender, EventArgs e)
     {
-        var criteriaPath = txtCriteriaPath.Text.Trim();
         var folder = txtFolderPath.Text.Trim();
         var apiKey = txtApiKey.Text.Trim();
         var model = txtModel.Text.Trim();
-
-        if (string.IsNullOrEmpty(criteriaPath) || !File.Exists(criteriaPath))
-        {
-            MessageBox.Show(this, "Chọn đúng file tiêu chí (.docx).", "Thiếu tiêu chí", MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-            return;
-        }
 
         if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder))
         {
@@ -112,16 +105,10 @@ public partial class Form1 : Form
 
         try
         {
-            Log("Đang đọc tiêu chí (cache theo hash file)...");
-            var criteriaText = _criteriaCache.GetCriteriaText(criteriaPath);
-
-            var criteriaFull = Path.GetFullPath(criteriaPath);
             var maxFiles = (int)numMaxFiles.Value;
             var candidates = Directory.EnumerateFiles(folder)
                 .Where(p =>
                 {
-                    if (string.Equals(Path.GetFullPath(p), criteriaFull, StringComparison.OrdinalIgnoreCase))
-                        return false;
                     var ext = Path.GetExtension(p).ToLowerInvariant();
                     return ext is ".docx" or ".pdf";
                 })
@@ -144,6 +131,12 @@ public partial class Form1 : Form
             using var cts = new CancellationTokenSource();
             foreach (var path in files)
             {
+                if (results.Count > 0 && results.Count % RequestBatchSize == 0)
+                {
+                    Log($"Tạm nghỉ {BatchPause.TotalSeconds:0}s sau {results.Count} bài để tránh rate limit...");
+                    await Task.Delay(BatchPause, cts.Token).ConfigureAwait(true);
+                }
+
                 var name = Path.GetFileName(path);
                 Log($"--- {name}");
                 try
@@ -153,7 +146,7 @@ public partial class Form1 : Form
                         throw new InvalidOperationException("Không trích được nội dung (file rỗng hoặc không đọc được).");
 
                     var grade = await _gemini
-                        .GradeAsync(name, criteriaText, essay, apiKey, model, cts.Token)
+                        .GradeAsync(name, essay, apiKey, model, cts.Token)
                         .ConfigureAwait(true);
 
                     results.Add(grade);
