@@ -17,9 +17,6 @@ partial class Form1
 
     private void InitializeComponent()
     {
-        lblCriteria = new Label();
-        txtCriteriaPath = new TextBox();
-        btnBrowseCriteria = new Button();
         lblFolder = new Label();
         txtFolderPath = new TextBox();
         btnBrowseFolder = new Button();
@@ -36,35 +33,10 @@ partial class Form1
         ((System.ComponentModel.ISupportInitialize)numMaxFiles).BeginInit();
         SuspendLayout();
         //
-        // lblCriteria
-        //
-        lblCriteria.AutoSize = true;
-        lblCriteria.Location = new Point(12, 15);
-        lblCriteria.Name = "lblCriteria";
-        lblCriteria.Size = new Size(130, 15);
-        lblCriteria.Text = "File tiêu chí (docx):";
-        //
-        // txtCriteriaPath
-        //
-        txtCriteriaPath.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-        txtCriteriaPath.Location = new Point(150, 12);
-        txtCriteriaPath.Name = "txtCriteriaPath";
-        txtCriteriaPath.Size = new Size(568, 23);
-        //
-        // btnBrowseCriteria
-        //
-        btnBrowseCriteria.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        btnBrowseCriteria.Location = new Point(724, 11);
-        btnBrowseCriteria.Name = "btnBrowseCriteria";
-        btnBrowseCriteria.Size = new Size(75, 25);
-        btnBrowseCriteria.Text = "Chọn...";
-        btnBrowseCriteria.UseVisualStyleBackColor = true;
-        btnBrowseCriteria.Click += BtnBrowseCriteria_Click;
-        //
         // lblFolder
         //
         lblFolder.AutoSize = true;
-        lblFolder.Location = new Point(12, 48);
+        lblFolder.Location = new Point(12, 15);
         lblFolder.Name = "lblFolder";
         lblFolder.Size = new Size(127, 15);
         lblFolder.Text = "Thư mục bài thi:";
@@ -72,14 +44,14 @@ partial class Form1
         // txtFolderPath
         //
         txtFolderPath.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-        txtFolderPath.Location = new Point(150, 45);
+        txtFolderPath.Location = new Point(150, 12);
         txtFolderPath.Name = "txtFolderPath";
         txtFolderPath.Size = new Size(568, 23);
         //
         // btnBrowseFolder
         //
         btnBrowseFolder.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        btnBrowseFolder.Location = new Point(724, 44);
+        btnBrowseFolder.Location = new Point(724, 11);
         btnBrowseFolder.Name = "btnBrowseFolder";
         btnBrowseFolder.Size = new Size(75, 25);
         btnBrowseFolder.Text = "Chọn...";
@@ -89,7 +61,7 @@ partial class Form1
         // lblApiKey
         //
         lblApiKey.AutoSize = true;
-        lblApiKey.Location = new Point(12, 81);
+        lblApiKey.Location = new Point(12, 48);
         lblApiKey.Name = "lblApiKey";
         lblApiKey.Size = new Size(101, 15);
         lblApiKey.Text = "Gemini API key:";
@@ -97,7 +69,7 @@ partial class Form1
         // txtApiKey
         //
         txtApiKey.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-        txtApiKey.Location = new Point(150, 78);
+        txtApiKey.Location = new Point(150, 45);
         txtApiKey.Name = "txtApiKey";
         txtApiKey.Size = new Size(649, 23);
         txtApiKey.UseSystemPasswordChar = true;
@@ -105,7 +77,7 @@ partial class Form1
         // lblModel
         //
         lblModel.AutoSize = true;
-        lblModel.Location = new Point(12, 114);
+        lblModel.Location = new Point(12, 81);
         lblModel.Name = "lblModel";
         lblModel.Size = new Size(91, 15);
         lblModel.Text = "Model Gemini:";
@@ -113,21 +85,21 @@ partial class Form1
         // txtModel
         //
         txtModel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-        txtModel.Location = new Point(150, 111);
+        txtModel.Location = new Point(150, 78);
         txtModel.Name = "txtModel";
         txtModel.Size = new Size(649, 23);
         //
         // lblMaxFiles
         //
         lblMaxFiles.AutoSize = true;
-        lblMaxFiles.Location = new Point(12, 146);
+        lblMaxFiles.Location = new Point(12, 113);
         lblMaxFiles.Name = "lblMaxFiles";
         lblMaxFiles.Size = new Size(115, 15);
         lblMaxFiles.Text = "Tối đa số file:";
         //
         // numMaxFiles
         //
-        numMaxFiles.Location = new Point(150, 143);
+        numMaxFiles.Location = new Point(150, 110);
         numMaxFiles.Maximum = new decimal(new int[] { 999, 0, 0, 0 });
         numMaxFiles.Minimum = new decimal(new int[] { 1, 0, 0, 0 });
         numMaxFiles.Name = "numMaxFiles";
@@ -137,28 +109,28 @@ partial class Form1
         // btnCham
         //
         btnCham.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        btnCham.Location = new Point(652, 172);
+        btnCham.Location = new Point(652, 138);
         btnCham.Name = "btnCham";
         btnCham.Size = new Size(147, 32);
-        btnCham.Text = "Chấm & xuất Excel";
+        btnCham.Text = "Chấm & xuất báo cáo";
         btnCham.UseVisualStyleBackColor = true;
         btnCham.Click += BtnCham_Click;
         //
         // txtLog
         //
         txtLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-        txtLog.Location = new Point(12, 238);
+        txtLog.Location = new Point(12, 205);
         txtLog.Multiline = true;
         txtLog.Name = "txtLog";
         txtLog.ReadOnly = true;
         txtLog.ScrollBars = ScrollBars.Vertical;
-        txtLog.Size = new Size(787, 211);
+        txtLog.Size = new Size(787, 244);
         txtLog.TabStop = false;
         //
         // progressBar
         //
         progressBar.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-        progressBar.Location = new Point(12, 208);
+        progressBar.Location = new Point(12, 175);
         progressBar.Name = "progressBar";
         progressBar.Size = new Size(787, 18);
         progressBar.Style = ProgressBarStyle.Marquee;
@@ -167,16 +139,16 @@ partial class Form1
         // lblHint
         //
         lblHint.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-        lblHint.Location = new Point(12, 172);
+        lblHint.Location = new Point(12, 138);
         lblHint.Name = "lblHint";
         lblHint.Size = new Size(620, 32);
-        lblHint.Text = "Chỉ xử lý tối đa N file đầu tiên (sắp xếp tên). Excel có cột chi tiết điểm + lý do từng hạng 1.1…4.";
+        lblHint.Text = "Tiêu chí chấm đã được nhúng sẵn (I.1–II.4). Xuất Word (.docx) hoặc Excel (.xlsx).";
         //
         // Form1
         //
         AutoScaleDimensions = new SizeF(7F, 15F);
         AutoScaleMode = AutoScaleMode.Font;
-        ClientSize = new Size(811, 491);
+        ClientSize = new Size(811, 461);
         Controls.Add(numMaxFiles);
         Controls.Add(lblMaxFiles);
         Controls.Add(lblHint);
@@ -190,13 +162,10 @@ partial class Form1
         Controls.Add(btnBrowseFolder);
         Controls.Add(txtFolderPath);
         Controls.Add(lblFolder);
-        Controls.Add(btnBrowseCriteria);
-        Controls.Add(txtCriteriaPath);
-        Controls.Add(lblCriteria);
-        MinimumSize = new Size(640, 430);
+        MinimumSize = new Size(640, 400);
         Name = "Form1";
         StartPosition = FormStartPosition.CenterScreen;
-        Text = "Chấm điểm (Gemini)";
+        Text = "Chấm điểm (Gemini) — Bữa cơm gia đình";
         ((System.ComponentModel.ISupportInitialize)numMaxFiles).EndInit();
         ResumeLayout(false);
         PerformLayout();
@@ -204,9 +173,6 @@ partial class Form1
 
     #endregion
 
-    private Label lblCriteria;
-    private TextBox txtCriteriaPath;
-    private Button btnBrowseCriteria;
     private Label lblFolder;
     private TextBox txtFolderPath;
     private Button btnBrowseFolder;

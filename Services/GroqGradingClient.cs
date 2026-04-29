@@ -68,7 +68,8 @@ public sealed class GeminiGradingClient : IDisposable
             },
             ["generationConfig"] = new Dictionary<string, object?>
             {
-                ["temperature"] = 0.25,
+                ["temperature"] = 0.05,
+                ["topP"] = 0.9,
                 ["responseMimeType"] = "application/json"
             }
         };
@@ -90,20 +91,75 @@ public sealed class GeminiGradingClient : IDisposable
             ? FormatChiTiet(grading.ChiTiet)
             : null;
 
+        var (sumNd, sumHt) = SumNdHt(grading.ChiTiet);
+        double? diemNd = grading.HopLe ? sumNd : null;
+        double? diemHt = grading.HopLe ? sumHt : null;
+        var tenTp = string.IsNullOrWhiteSpace(grading.TenTacGiaTacPham)
+            ? Path.GetFileNameWithoutExtension(fileName)
+            : grading.TenTacGiaTacPham.Trim();
+        var nxNoiBat = string.IsNullOrWhiteSpace(grading.NhanXetNoiBat)
+            ? grading.GhiChuNgan?.Trim()
+            : grading.NhanXetNoiBat.Trim();
+
+        var tongComputed = diemNd.HasValue && diemHt.HasValue ? diemNd.Value + diemHt.Value : grading.TongDiem;
+
         return new GradeResult
         {
             FileName = fileName,
             HopLe = grading.HopLe,
             LyDoKhongHopLe = grading.LyDoNeuKhongHopLe,
-            TongDiem = grading.TongDiem,
+            TongDiem = tongComputed,
+            DiemNoiDung = diemNd,
+            DiemHinhThuc = diemHt,
             PhanLoai = NormalizePhanLoai(grading.PhanLoai),
             GhiChu = grading.GhiChuNgan,
+            TenTacGiaTacPham = tenTp,
+            NhanXetNoiBat = nxNoiBat,
             ChiTietDiemVaLyDo = chiTietText,
-            NhanXetDatTu85 = ShouldIncludeHighScoreComment(grading.HopLe, grading.TongDiem)
+            NhanXetDatTu85 = ShouldIncludeHighScoreComment(grading.HopLe, tongComputed)
                 ? NormalizeHighScoreComment(grading.NhanXet8_5Plus)
                 : null,
             RawModelJson = $"{{\"used_model\":\"{usedModel}\",\"payload\":{jsonPayload}}}"
         };
+    }
+
+    private static (double nd, double ht) SumNdHt(ChiTietItem[]? items)
+    {
+        if (items == null || items.Length == 0)
+            return (0, 0);
+
+        double nd = 0;
+        double ht = 0;
+
+        foreach (var it in items)
+        {
+            var ma = it.Ma?.Trim() ?? "";
+            if (!it.DiemCham.HasValue)
+                continue;
+
+            var v = it.DiemCham.Value;
+
+            // Hỗ trợ cả 2 format ma: mới (I.1/II.1) và cũ (1.1/2.1).
+            if (ma.StartsWith("II.", StringComparison.OrdinalIgnoreCase) ||
+                ma.StartsWith("II", StringComparison.OrdinalIgnoreCase) ||
+                ma.StartsWith("2.", StringComparison.OrdinalIgnoreCase))
+            {
+                ht += v;
+                continue;
+            }
+
+            if (ma.StartsWith("I.", StringComparison.OrdinalIgnoreCase) ||
+                ma.StartsWith("I", StringComparison.OrdinalIgnoreCase) ||
+                ma.StartsWith("1.", StringComparison.OrdinalIgnoreCase))
+            {
+                nd += v;
+                continue;
+            }
+
+            // (foreach tiếp tục với các hạng mục khác)
+        }
+
+        return (nd, ht);
     }
 
     private async Task<(string responseText, string usedModel)> SendGenerateContentWithFallbackAsync(
@@ -361,36 +417,64 @@ public sealed class GeminiGradingClient : IDisposable
 {
   "hop_le": <boolean>,
   "ly_do_neu_khong_hop_le": <string hoặc null>,
-  "tong_diem": <số từ 0 đến 10 hoặc null nếu không hợp lệ>,
+  "tong_diem": <số 0–10 hoặc null nếu không hợp lệ>,
+  "diem_noi_dung": <tổng nhóm I., tối đa 6, hoặc null nếu không hợp lệ>,
+  "diem_hinh_thuc": <tổng nhóm II., tối đa 4, hoặc null nếu không hợp lệ>,
+  "ten_tac_gia_tac_pham": <string ngắn: ví dụ "Nguyễn Văn A (Tựa bài)" hoặc chỉ tựa — phục vụ bảng tổng hợp>,
   "phan_loai": <một trong: "Trung binh"|"Kha"|"Gioi"|null>,
   "ghi_chu_ngan": <string ngắn>,
-  "chi_tiet": <mảng có đúng 7 phần tử khi hop_le=true, hoặc [] khi hop_le=false>,
+  "nhan_xet_noi_bat": <nhận xét nổi bật cho cột cuối bảng: phải nêu rõ đạt/thiếu phần thông điệp ≤30 từ nếu có>,
+  "so_tu_thong_diep": <số từ của phần thông điệp nếu xác định được; null nếu không có hoặc không rõ>,
+  "chi_tiet": <mảng có đúng 9 phần tử khi hop_le=true, hoặc [] khi hop_le=false>,
   "nhan_xet_8_5_plus": <string nhiều dòng hoặc null>
 }
 
-Mỗi phần tử của "chi_tiet": { "ma": "1.1", "ten": "<tên hạng mục ngắn>", "diem_toi_da": <số>, "diem_cham": <số>, "ly_do": "<giải thích ngắn gọn>" }
+Mỗi phần tử "chi_tiet": { "ma": "I.1", "ten": "...", "diem_toi_da": <số>, "diem_cham": <số>, "ly_do": "..." }
+
+Thứ tự và mã BẮT BUỘC khi hop_le=true (Bước 2 — thang 10 điểm):
+I. NỘI DUNG (tối đa 6):
+  "I.1" điểm tối đa 2 — Bám chủ đề (một hoặc nhiều chủ đề: kỷ niệm bữa cơm; hương vị nhà; bữa cơm hàn gắn thế hệ; giáo dục từ bàn ăn; góc nhìn hiện đại/truyền thống).
+  "I.2" tối đa 1 — Chất lượng kể chuyện (cụ thể, sâu, thuyết phục).
+  "I.3" tối đa 1.5 — Cảm xúc chân thành, tích cực, truyền cảm hứng.
+  "I.4" tối đa 1 — Giá trị gia đình (gắn kết, yêu thương, chia sẻ, giáo dục).
+  "I.5" tối đa 0.5 — Ý nghĩa/bài học tích cực về giá trị bữa cơm gia đình.
+
+II. HÌNH THỨC (tối đa 4):
+  "II.1" tối đa 1.5 — Ngôn ngữ mạch lạc, dễ hiểu, ít lỗi chính tả.
+  "II.2" tối đa 1 — Phong cách viết, biện pháp tu từ/hình ảnh có hiệu quả.
+  "II.3" tối đa 0.5 — Bố cục rõ ràng, logic.
+  "II.4" tối đa 1 — Có phần thông điệp rõ ràng KHÔNG QUÁ 30 TỪ (đếm theo quy tắc từ tiếng Việt: tách theo khoảng trắng). Nếu thiếu phần thông điệp hoặc >30 từ thì cho 0 điểm hạng mục này và ghi rõ trong ly_do/nhan_xet_noi_bat.
+
+Tiêu chí phụ (không cộng điểm, chỉ ghi nhận trong ly_do nếu cần): chữ viết tay đẹp; video/ảnh minh họa.
 """;
 
         return $"""
-Áp dụng CHÍNH XÁC bộ tiêu chí sau (đã trích từ tài liệu chấm điểm):
+Áp dụng CHÍNH XÁC bộ tiêu chí sau (tài liệu chấm điểm — gồm Bước 1 loại bài không hợp lệ và Bước 2 chấm điểm):
 
 ---
 {criteriaPlainText}
 ---
 
 Nhiệm vụ:
-1) Xác định bài có thuộc trường hợp KHÔNG HỢP LỆ theo Bước 1 trong tiêu chí hay không.
-2) Nếu HỢP LỆ, chấm theo thang điểm Bước 2 (tối đa 10 điểm). Tổng các diem_cham trong chi_tiet phải khớp với tong_diem (sai số làm tròn tối đa 0.2). Phân loại theo Bước 3.
-3) Khi hop_le=true, trả về chi_tiet gồm ĐÚNG 7 hạng theo thang trong tiêu chí, theo thứ tự:
-   ma "1.1" (tối đa 3 điểm), "1.2" (tối đa 2), "2.1" (tối đa 1), "2.2" (tối đa 1), "2.3" (tối đa 1), "3" (tối đa 1), "4" (tối đa 1).
-   Điền "ten" theo đúng wording gần với bảng thang điểm trong tiêu chí.
-4) Khi hop_le=false: chi_tiet là mảng rỗng [], tong_diem null.
-5) Nếu hop_le=true và tong_diem > 8.5:
-   - "nhan_xet_8_5_plus" phải có nhận xét chi tiết kiểu ban giám khảo, gồm nhiều dòng dễ đọc.
-   - Mỗi ý nên có "Lý do:" và "Nhận xét:" ngắn gọn, cụ thể theo nội dung bài.
-   - Nếu tong_diem <= 8.5 hoặc không hợp lệ thì "nhan_xet_8_5_plus" = null.
+1) Áp dụng Bước 1: nếu bài thuộc một trong các trường hợp KHÔNG HỢP LỆ trong tiêu chí (ví dụ: không phải văn xuôi tiếng Việt, sai chủ đề, quá 1500 từ phần nội dung, nhóm tác giả, vi phạm đạo đức/pháp luật, sai định dạng theo thể lệ, v.v.) thì hop_le=false, nêu ly_do_neu_khong_hop_le cụ thể, chi_tiet=[], tong_diem/diem_noi_dung/diem_hinh_thuc null.
+2) Nếu HỢP LỆ: chấm Bước 2 đủ 9 hạng mục I.1…II.4 như trên. Tổng diem_cham phải bằng tong_diem (sai số làm tròn tối đa 0.1). diem_noi_dung = tổng I.1…I.5 (≤6), diem_hinh_thuc = tổng II.1…II.4 (≤4). Tong_diem = diem_noi_dung + diem_hinh_thuc.
+3) Đối với II.4: tự tìm trong bài phần được coi là "thông điệp" (thường đoạn kết/câu tóm tắt có nhãn hoặc rõ ý kết luận). Đếm số từ; nếu không có hoặc >30 từ thì diem_cham của II.4 = 0.
+4) Khi hop_le=true và tong_diem > 8.5: điền nhan_xet_8_5_plus chi tiết nhiều dòng (Lý do / Nhận xét); ngược lại null.
+5) nhan_xet_noi_bat và ghi_chu_ngan: ngắn gọn, phù hợp cột "Nhận xét nổi bật" trong báo cáo.
 
-Trả về ĐÚNG một đối tượng JSON với các khóa sau (không thêm khóa ngoài schema). Ví dụ dạng cấu trúc (không copy số điểm mẫu):
+Quy tắc CHẤM BẢO THỦ (nhằm tránh chấm cao quá):
+- Chỉ cho mức điểm "cao" nếu trong bài có minh chứng trực tiếp khớp mô tả hạng mục. Nếu chỉ là suy đoán/khái quát chung -> chấm mức thấp hơn.
+- Khi không đủ chắc (thiếu dữ kiện, thiếu chi tiết chứng minh, hoặc luận điểm mơ hồ) => chọn mức thấp hơn thay vì đoán.
+- I.5 và II.4 thường dễ bị chấm cao: chỉ chấm >0 điểm khi có kết luận/bài học/thông điệp rõ ràng, tách biệt với phần kể lể.
+- II.1: nếu có lỗi chính tả/ngữ pháp nhiều, câu thiếu cấu trúc, hoặc diễn đạt khó hiểu -> không vượt quá 1.0.
+- II.3: nếu bố cục/logic trình bày rời rạc, ý nhảy cóc -> chấm thấp (có thể 0).
+- II.4: nếu không tìm được "thông điệp" rõ ràng hoặc không thể xác định ranh giới phần thông điệp -> coi như không đạt và chấm 0.
+
+Quy tắc "bắt buộc có chứng cứ" để giảm dao động giữa các mô hình:
+- Trong trường "ly_do" của mỗi hạng mục, bắt buộc ghi kèm 1 câu trích từ bài (đặt trong dấu ngoặc kép) sao cho phù hợp với quyết định chấm điểm.
+- Nếu không có câu trích cụ thể (hoặc chỉ diễn giải chung) thì model phải giảm điểm ít nhất 30% so với mức tối đa của hạng mục đó.
+
+Trả về ĐÚNG một đối tượng JSON (không thêm khóa ngoài schema). Ví dụ cấu trúc:
 {jsonShape}
 
 Quy ước phan_loai khi hop_le=true: điểm < 5 -> "Trung binh"; 5 <= điểm <= 8 -> "Kha"; điểm > 8 -> "Gioi".
@@ -416,11 +500,23 @@ internal sealed class GradingJson
     [JsonPropertyName("tong_diem")]
     public double? TongDiem { get; set; }
 
+    [JsonPropertyName("diem_noi_dung")]
+    public double? DiemNoiDung { get; set; }
+
+    [JsonPropertyName("diem_hinh_thuc")]
+    public double? DiemHinhThuc { get; set; }
+
+    [JsonPropertyName("ten_tac_gia_tac_pham")]
+    public string? TenTacGiaTacPham { get; set; }
+
     [JsonPropertyName("phan_loai")]
     public string? PhanLoai { get; set; }
 
     [JsonPropertyName("ghi_chu_ngan")]
     public string? GhiChuNgan { get; set; }
+
+    [JsonPropertyName("nhan_xet_noi_bat")]
+    public string? NhanXetNoiBat { get; set; }
 
     [JsonPropertyName("chi_tiet")]
     public ChiTietItem[]? ChiTiet { get; set; }

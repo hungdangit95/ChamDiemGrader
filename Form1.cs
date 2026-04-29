@@ -5,15 +5,15 @@ namespace ChamDiemGrader;
 
 public partial class Form1 : Form
 {
-    private readonly CriteriaCacheService _criteriaCache = new();
     private readonly GeminiGradingClient _gemini = new();
 
     public Form1()
     {
+        TraceLogger.Write("Form1() ctor start");
         InitializeComponent();
         txtModel.Text = "gemini-2.0-flash";
-        txtCriteriaPath.Text = ResolveDefaultCriteriaPath();
         TryLoadApiKeyFromEnv();
+        TraceLogger.Write("Form1() ctor end");
     }
 
     private void TryLoadApiKeyFromEnv()
@@ -21,34 +21,6 @@ public partial class Form1 : Form
         var key = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
         if (!string.IsNullOrWhiteSpace(key))
             txtApiKey.Text = key;
-    }
-
-    private static string ResolveDefaultCriteriaPath()
-    {
-        var dir = AppContext.BaseDirectory;
-        for (var i = 0; i < 8; i++)
-        {
-            var candidate = Path.Combine(dir, "Cham so loai.docx");
-            if (File.Exists(candidate))
-                return candidate;
-            var parent = Directory.GetParent(dir)?.FullName;
-            if (parent == null || parent == dir)
-                break;
-            dir = parent;
-        }
-
-        return Path.Combine(AppContext.BaseDirectory, "Cham so loai.docx");
-    }
-
-    private void BtnBrowseCriteria_Click(object? sender, EventArgs e)
-    {
-        using var dlg = new OpenFileDialog
-        {
-            Filter = "Word (*.docx)|*.docx|Tất cả|*.*",
-            Title = "Chọn file tiêu chí Cham so loai.docx"
-        };
-        if (dlg.ShowDialog(this) == DialogResult.OK)
-            txtCriteriaPath.Text = dlg.FileName;
     }
 
     private void BtnBrowseFolder_Click(object? sender, EventArgs e)
@@ -60,17 +32,9 @@ public partial class Form1 : Form
 
     private async void BtnCham_Click(object? sender, EventArgs e)
     {
-        var criteriaPath = txtCriteriaPath.Text.Trim();
         var folder = txtFolderPath.Text.Trim();
         var apiKey = txtApiKey.Text.Trim();
         var model = txtModel.Text.Trim();
-
-        if (string.IsNullOrEmpty(criteriaPath) || !File.Exists(criteriaPath))
-        {
-            MessageBox.Show(this, "Chọn đúng file tiêu chí (.docx).", "Thiếu tiêu chí", MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-            return;
-        }
 
         if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder))
         {
@@ -96,8 +60,8 @@ public partial class Form1 : Form
         string outPath;
         using (var saveDlg = new SaveFileDialog
                {
-                   Filter = "Excel (*.xlsx)|*.xlsx",
-                   FileName = $"KetQuaCham_{DateTime.Now:yyyyMMdd_HHmm}.xlsx",
+                   Filter = "Word (*.docx)|*.docx|Excel (*.xlsx)|*.xlsx",
+                   FileName = $"KetQuaCham_{DateTime.Now:yyyyMMdd_HHmm}.docx",
                    InitialDirectory = folder
                })
         {
@@ -112,16 +76,15 @@ public partial class Form1 : Form
 
         try
         {
-            Log("Đang đọc tiêu chí (cache theo hash file)...");
-            var criteriaText = _criteriaCache.GetCriteriaText(criteriaPath);
+            TraceLogger.Write("FLOW START");
+            var criteriaText = EmbeddedCriteria.Text;
+            Log($"Tiêu chí: nhúng sẵn ({criteriaText.Length} ký tự).");
+            TraceLogger.Write("Loaded criteria (embedded, len=" + criteriaText.Length + ")");
 
-            var criteriaFull = Path.GetFullPath(criteriaPath);
             var maxFiles = (int)numMaxFiles.Value;
             var candidates = Directory.EnumerateFiles(folder)
                 .Where(p =>
                 {
-                    if (string.Equals(Path.GetFullPath(p), criteriaFull, StringComparison.OrdinalIgnoreCase))
-                        return false;
                     var ext = Path.GetExtension(p).ToLowerInvariant();
                     return ext is ".docx" or ".pdf";
                 })
@@ -136,9 +99,9 @@ public partial class Form1 : Form
                 return;
             }
 
-            Log(
-                $"Trong thư mục có {candidates.Count} file phù hợp; giới hạn {maxFiles} file đầu tiên → chấm {files.Count} file.");
+            Log($"Trong thư mục có {candidates.Count} file; giới hạn {maxFiles} → chấm {files.Count} file.");
             Log("Bắt đầu gọi Gemini...");
+            TraceLogger.Write("Begin grading (fileCount=" + files.Count + ")");
 
             var results = new List<GradeResult>();
             using var cts = new CancellationTokenSource();
@@ -146,24 +109,60 @@ public partial class Form1 : Form
             {
                 var name = Path.GetFileName(path);
                 Log($"--- {name}");
+                TraceLogger.Write("Grading file: " + name);
                 try
                 {
+                    TraceLogger.Write("  Extracting essay...");
                     var essay = DocumentTextExtractor.Extract(path);
                     if (string.IsNullOrWhiteSpace(essay))
                         throw new InvalidOperationException("Không trích được nội dung (file rỗng hoặc không đọc được).");
 
+                    var pre = PreScreener.Screen(path, essay);
+                    var fmtMsg = pre.FormatChecked == true
+                        ? (pre.FormatOk == true
+                            ? "định dạng OK (TNR/14pt)"
+                            : $"định dạng SAI ({pre.FontDominant ?? "?"}/{(pre.FontSizeDominantPt?.ToString() ?? "?")}pt)")
+                        : "định dạng không kiểm (PDF)";
+                    Log($"  Bước 1: {pre.WordCount} từ; {fmtMsg}.");
+                    TraceLogger.Write(
+                        $"  Pre-screen: hopLe={pre.HopLe} words={pre.WordCount} font={pre.FontDominant} sizePt={pre.FontSizeDominantPt} formatOk={pre.FormatOk}");
+
+                    if (!pre.HopLe)
+                    {
+                        var lyDo = string.Join(" ", pre.LyDo);
+                        Log($"  -> Bước 1 LOẠI: {lyDo}");
+                        results.Add(new GradeResult
+                        {
+                            FileName = name,
+                            HopLe = false,
+                            LyDoKhongHopLe = lyDo,
+                            TongDiem = null,
+                            PhanLoai = null,
+                            GhiChu = $"Bước 1 (sơ loại): {pre.WordCount} từ; "
+                                     + (pre.FormatChecked == true
+                                         ? (pre.FormatOk == true ? "định dạng OK" : "định dạng sai")
+                                         : "không kiểm định dạng"),
+                            ChiTietDiemVaLyDo = null,
+                            RawModelJson = null
+                        });
+                        continue;
+                    }
+
+                    TraceLogger.Write("  Calling model (essayLen=" + essay.Length + ")");
                     var grade = await _gemini
                         .GradeAsync(name, criteriaText, essay, apiKey, model, cts.Token)
                         .ConfigureAwait(true);
 
                     results.Add(grade);
+                    TraceLogger.Write("  Graded OK: hopLe=" + grade.HopLe + " tong=" + (grade.TongDiem.HasValue ? grade.TongDiem.Value.ToString("0.#") : "null"));
                     Log(grade.HopLe
-                        ? $"  -> Hợp lệ, điểm: {grade.TongDiem:0.#}"
-                        : $"  -> Không hợp lệ: {grade.LyDoKhongHopLe}");
+                        ? $"  -> Hợp lệ, điểm: {grade.TongDiem:0.#} (ND={grade.DiemNoiDung:0.#} HT={grade.DiemHinhThuc:0.#})"
+                        : $"  -> Bước 1/2 (model) LOẠI: {grade.LyDoKhongHopLe}");
                 }
                 catch (Exception ex)
                 {
                     Log($"  LỖI: {ex.Message}");
+                    TraceLogger.Write("  Grade FAIL: " + ex);
                     results.Add(new GradeResult
                     {
                         FileName = name,
@@ -178,7 +177,30 @@ public partial class Form1 : Form
                 }
             }
 
-            ExcelReportWriter.Save(outPath, results);
+            try
+            {
+                TraceLogger.Write("Export START (outPath=" + outPath + ")");
+                if (string.Equals(Path.GetExtension(outPath), ".xlsx", StringComparison.OrdinalIgnoreCase))
+                {
+                    TraceLogger.Write("Export Excel...");
+                    ExcelReportWriter.Save(outPath, results);
+                }
+                else
+                {
+                    TraceLogger.Write("Export Docx...");
+                    DocxReportWriter.Save(outPath, results);
+                }
+                TraceLogger.Write("Export DONE");
+            }
+            catch (Exception ex)
+            {
+                Log("LỖI XUẤT BÁO CÁO: " + ex);
+                TraceLogger.Write("Export FAIL: " + ex);
+                MessageBox.Show(this, ex.ToString(), "Lỗi xuất báo cáo", MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+
             Log($"Hoàn tất. Đã lưu: {outPath}");
             MessageBox.Show(this, $"Đã xuất {results.Count} dòng.\n{outPath}", "Xong", MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
@@ -186,7 +208,8 @@ public partial class Form1 : Form
         catch (Exception ex)
         {
             Log("LỖI: " + ex);
-            MessageBox.Show(this, ex.Message, "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            TraceLogger.Write("FLOW FAIL: " + ex);
+            MessageBox.Show(this, ex.ToString(), "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {

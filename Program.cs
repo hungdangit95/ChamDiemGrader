@@ -1,3 +1,5 @@
+using ChamDiemGrader.Services;
+
 namespace ChamDiemGrader;
 
 static class Program
@@ -8,6 +10,7 @@ static class Program
     [STAThread]
     static void Main()
     {
+        TraceLogger.Write("APP START Main()");
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, e) => ShowFatal(e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
@@ -28,6 +31,15 @@ static class Program
                 "Unhandled exception",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
+        }
+        catch
+        {
+            // ignore
+        }
+
+        try
+        {
+            ChamDiemGrader.Services.TraceLogger.Write("UNHANDLED: " + ex);
         }
         catch
         {
