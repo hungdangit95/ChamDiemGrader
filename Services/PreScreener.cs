@@ -15,7 +15,7 @@ public sealed class PreScreeningResult
     /// <summary>Có kiểm tra được định dạng hay không (chỉ áp dụng .docx).</summary>
     public bool? FormatChecked { get; set; }
 
-    /// <summary>true = TNR + 14pt (đa số ký tự); false = sai; null = không kiểm.</summary>
+    /// <summary>true = đúng định dạng theo thể lệ (đa số ký tự); false = sai; null = không kiểm.</summary>
     public bool? FormatOk { get; set; }
 }
 
@@ -59,7 +59,7 @@ public static class PreScreener
                     result.HopLe = false;
                     var sizePt = sizeHalf > 0 ? (sizeHalf / 2).ToString() : "?";
                     result.LyDo.Add(
-                        $"Sai định dạng so với thể lệ (yêu cầu Times New Roman cỡ 14). " +
+                        $"Sai định dạng so với thể lệ (yêu cầu cỡ 14). " +
                         $"Phần lớn nội dung đang dùng \"{font ?? "(không xác định)"}\" cỡ {sizePt}pt.");
                 }
             }
@@ -179,11 +179,9 @@ public static class PreScreener
             ? sizeTotals.OrderByDescending(kv => kv.Value).First().Key
             : 0;
 
-        var fontOk = domFont.Contains("Times New Roman", StringComparison.OrdinalIgnoreCase)
-                     || domFont.Equals("Times", StringComparison.OrdinalIgnoreCase)
-                     || domFont.Contains("Times", StringComparison.OrdinalIgnoreCase);
         var sizeOk = domSize == 28; // 14pt = 28 half-points
 
-        return (domFont, domSize, fontOk && sizeOk);
+        // Bỏ kiểm font chữ; chỉ kiểm cỡ chữ 14pt theo thể lệ.
+        return (domFont, domSize, sizeOk);
     }
 }

@@ -16,7 +16,7 @@ Bài dự thi bị loại (không đưa vào chấm điểm) nếu thuộc một
 4. Bài viết không phù hợp với văn hóa, thuần phong, mỹ tục và không tuân theo quy định của pháp luật của Việt Nam.
 5. Bài dự thi không đúng chủ đề "Bữa cơm gia đình ấm áp yêu thương".
 6. Bài dự thi là bài tập thể (nhóm tác giả).
-7. Bài dự thi không được trình bày trên 1 mặt giấy A4 (đối với bài dự thi viết tay) và không được trình bày nội dung vào file văn bản, không đúng font chữ Times New Roman, cỡ chữ 14 (đối với bài dự thi đánh máy).
+7. Bài dự thi không được trình bày trên 1 mặt giấy A4 (đối với bài dự thi viết tay) và không được trình bày nội dung vào file văn bản, không đúng cỡ chữ 14 (đối với bài dự thi đánh máy).
 
 Lưu ý quan trọng: Những bài bị mất điểm đáng kể ở phần Hình thức do không phân tách rõ "Thông điệp" (không quá 30 từ) hoặc có ràng ở cuối bài theo đúng yêu cầu kết thúc của mẫu thông điệp. Những bài xuất sắc đạt điểm cao là những bài có câu chuyện xúc động mạnh, trình bày thuyết phục và có thông điệp rõ ràng, súc tích, truyền thống.
 

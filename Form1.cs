@@ -120,8 +120,8 @@ public partial class Form1 : Form
                     var pre = PreScreener.Screen(path, essay);
                     var fmtMsg = pre.FormatChecked == true
                         ? (pre.FormatOk == true
-                            ? "định dạng OK (TNR/14pt)"
-                            : $"định dạng SAI ({pre.FontDominant ?? "?"}/{(pre.FontSizeDominantPt?.ToString() ?? "?")}pt)")
+                            ? "định dạng OK (14pt)"
+                            : $"định dạng SAI (/{(pre.FontSizeDominantPt?.ToString() ?? "?")}pt)")
                         : "định dạng không kiểm (PDF)";
                     Log($"  Bước 1: {pre.WordCount} từ; {fmtMsg}.");
                     TraceLogger.Write(

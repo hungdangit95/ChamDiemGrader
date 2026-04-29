@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using ChamDiemGrader.Models;
 
 namespace ChamDiemGrader.Services;
@@ -87,13 +88,17 @@ public sealed class GeminiGradingClient : IDisposable
         var grading = JsonSerializer.Deserialize<GradingJson>(jsonPayload, JsonResp)
                       ?? throw new InvalidOperationException("Model không trả JSON hợp lệ: " + content);
 
-        var chiTietText = grading.HopLe
-            ? FormatChiTiet(grading.ChiTiet)
-            : null;
-
-        var (sumNd, sumHt) = SumNdHt(grading.ChiTiet);
-        double? diemNd = grading.HopLe ? sumNd : null;
-        double? diemHt = grading.HopLe ? sumHt : null;
+        string? chiTietText = null;
+        double? diemNd = null;
+        double? diemHt = null;
+        if (grading.HopLe)
+        {
+            // SumNdHt sẽ "siết" diem_cham dựa vào ly_do (bắt buộc có chứng cứ).
+            var (sumNd, sumHt) = SumNdHt(grading.ChiTiet);
+            diemNd = sumNd;
+            diemHt = sumHt;
+            chiTietText = FormatChiTiet(grading.ChiTiet);
+        }
         var tenTp = string.IsNullOrWhiteSpace(grading.TenTacGiaTacPham)
             ? Path.GetFileNameWithoutExtension(fileName)
             : grading.TenTacGiaTacPham.Trim();
@@ -137,7 +142,10 @@ public sealed class GeminiGradingClient : IDisposable
             if (!it.DiemCham.HasValue)
                 continue;
 
-            var v = it.DiemCham.Value;
+            var v0 = it.DiemCham.Value;
+            var maxForItem = it.DiemToiDa ?? GetMaxForItemByMa(ma);
+            var v = ApplyEvidenceTightening(v0, maxForItem, it.LyDo, ma);
+            it.DiemCham = v;
 
             // Hỗ trợ cả 2 format ma: mới (I.1/II.1) và cũ (1.1/2.1).
             if (ma.StartsWith("II.", StringComparison.OrdinalIgnoreCase) ||
@@ -160,6 +168,105 @@ public sealed class GeminiGradingClient : IDisposable
         }
 
         return (nd, ht);
+    }
+
+    private static double GetMaxForItemByMa(string ma)
+    {
+        if (string.IsNullOrWhiteSpace(ma))
+            return 0;
+
+        // Supports both "I.1".."I.5" and "1.1".."1.5", likewise for II.
+        var mNd = Regex.Match(ma, @"^(I\.?|1\.)([1-5])", RegexOptions.IgnoreCase);
+        if (mNd.Success)
+        {
+            var idx = int.Parse(mNd.Groups[2].Value);
+            return idx switch
+            {
+                1 => 2.0,   // I.1 max 2
+                2 => 1.0,   // I.2 max 1
+                3 => 1.5,   // I.3 max 1.5
+                4 => 1.0,   // I.4 max 1
+                5 => 0.5,   // I.5 max 0.5
+                _ => 0
+            };
+        }
+
+        var mHt = Regex.Match(ma, @"^(II\.?|2\.)([1-4])", RegexOptions.IgnoreCase);
+        if (mHt.Success)
+        {
+            var idx = int.Parse(mHt.Groups[2].Value);
+            return idx switch
+            {
+                1 => 1.5,   // II.1 max 1.5
+                2 => 1.0,   // II.2 max 1
+                3 => 0.5,   // II.3 max 0.5
+                4 => 1.0,   // II.4 max 1
+                _ => 0
+            };
+        }
+
+        return 0;
+    }
+
+    private static double ApplyEvidenceTightening(double v, double maxForItem, string? lyDo, string ma)
+    {
+        if (maxForItem <= 0)
+            return Math.Max(0, v);
+
+        v = Math.Max(0, Math.Min(v, maxForItem));
+
+        var longestQuoteLen = GetLongestEvidenceQuoteLength(lyDo);
+        var hasSufficientEvidence = longestQuoteLen >= 10; // phải có đoạn trích trực tiếp đủ dài
+
+        // I.5 (bài học) và II.4 (thông điệp <= 30 từ) rất dễ bị chấm cao khi thiếu chứng cứ.
+        var isI5 = Regex.IsMatch(ma, @"^(I\.?|1\.)(5)$", RegexOptions.IgnoreCase);
+        var isII4 = Regex.IsMatch(ma, @"^(II\.?|2\.)(4)$", RegexOptions.IgnoreCase);
+
+        if (!hasSufficientEvidence)
+        {
+            if (isI5 || isII4)
+                return 0; // không có câu trích rõ ràng => bắt buộc 0
+
+            // Thiếu chứng cứ => hạ mạnh (cắt trần còn 35% max).
+            return Math.Min(v, maxForItem * 0.35);
+        }
+
+        // Có chứng cứ rồi, nhưng nếu model cố cho gần sát max thì yêu cầu đoạn trích dài hơn.
+        if (v >= maxForItem * 0.9 && longestQuoteLen < 25)
+            v = Math.Min(v, maxForItem * 0.7);
+        else if (v >= maxForItem * 0.75 && longestQuoteLen < 15)
+            v = Math.Min(v, maxForItem * 0.6);
+
+        return v;
+    }
+
+    private static int GetLongestEvidenceQuoteLength(string? lyDo)
+    {
+        if (string.IsNullOrWhiteSpace(lyDo))
+            return 0;
+
+        // Accept both straight quotes "..." and smart quotes “...”.
+        var matches1 = Regex.Matches(lyDo, "\"([^\"]+)\"");
+        var matches2 = Regex.Matches(lyDo, "“([^”]+)”");
+
+        var best = 0;
+        foreach (Match m in matches1)
+        {
+            if (!m.Success)
+                continue;
+            var s = m.Groups[1].Value?.Trim() ?? "";
+            best = Math.Max(best, s.Length);
+        }
+
+        foreach (Match m in matches2)
+        {
+            if (!m.Success)
+                continue;
+            var s = m.Groups[1].Value?.Trim() ?? "";
+            best = Math.Max(best, s.Length);
+        }
+
+        return best;
     }
 
     private async Task<(string responseText, string usedModel)> SendGenerateContentWithFallbackAsync(
@@ -472,7 +579,8 @@ Quy tắc CHẤM BẢO THỦ (nhằm tránh chấm cao quá):
 
 Quy tắc "bắt buộc có chứng cứ" để giảm dao động giữa các mô hình:
 - Trong trường "ly_do" của mỗi hạng mục, bắt buộc ghi kèm 1 câu trích từ bài (đặt trong dấu ngoặc kép) sao cho phù hợp với quyết định chấm điểm.
-- Nếu không có câu trích cụ thể (hoặc chỉ diễn giải chung) thì model phải giảm điểm ít nhất 30% so với mức tối đa của hạng mục đó.
+- Nếu không có câu trích cụ thể (hoặc chỉ diễn giải chung) thì model phải giảm điểm ít nhất 50% so với mức tối đa của hạng mục đó.
+- Với I.5 và II.4: nếu không có câu trích/câu kết luận đủ rõ ràng để xác định bài học/thông điệp (<= 30 từ) thì diem_cham của hạng mục đó phải = 0.
 
 Trả về ĐÚNG một đối tượng JSON (không thêm khóa ngoài schema). Ví dụ cấu trúc:
 {jsonShape}

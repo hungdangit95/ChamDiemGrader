@@ -110,7 +110,7 @@ public static class DocxReportWriter
             "nội dung trái với thuần phong mỹ tục, đạo đức, pháp luật Việt Nam; sai chủ đề " +
             "(chủ đề hợp lệ theo thể lệ, ví dụ hướng về bữa cơm gia đình ấm áp yêu thương); " +
             "bài nhóm (phải cá nhân); sai quy định định dạng (ví dụ: viết tay không đúng quy định; " +
-            "bản đánh máy không Times New Roman cỡ 14 theo thể lệ).",
+            "bản đánh máy không đúng cỡ 14 theo thể lệ).",
             bold: false);
 
         yield return ParaSpacerSmall();
