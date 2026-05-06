@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -41,7 +41,9 @@ public sealed class GeminiGradingClient : IDisposable
         var essay = TrimEssay(CompactWhitespace(essayPlainText), maxChars: 120_000);
 
         var systemPrompt =
-            "Bạn là giám khảo chấm bài viết tiếng Việt theo đúng thể lệ được cung cấp. " +
+            "Bạn là giám khảo độc lập chấm bài thi nhận giải — không phải chấm bài học đường. " +
+            "Yêu cầu tuyệt đối: CÔNG TÂM, CHÍNH XÁC, CHẶT CHẼ. Không khích lệ, không nâng điểm vì thương. " +
+            "Chỉ cho điểm cao khi bài THỰC SỰ vượt trội so với đại đa số bài dự thi. " +
             "Chỉ trả về một đối tượng JSON bắt đầu bằng ký tự {. Không markdown, không bọc trong ``` hay ```json, không tiền tố hay giải thích ngoài JSON.";
 
         var userPrompt = BuildUserPrompt(compactCriteria, essay);
@@ -69,8 +71,9 @@ public sealed class GeminiGradingClient : IDisposable
             },
             ["generationConfig"] = new Dictionary<string, object?>
             {
-                ["temperature"] = 0.05,
-                ["topP"] = 0.9,
+                ["temperature"] = 0,
+                ["topP"] = 1.0,
+                ["seed"] = 42,
                 ["responseMimeType"] = "application/json"
             }
         };
@@ -88,25 +91,14 @@ public sealed class GeminiGradingClient : IDisposable
         var grading = JsonSerializer.Deserialize<GradingJson>(jsonPayload, JsonResp)
                       ?? throw new InvalidOperationException("Model không trả JSON hợp lệ: " + content);
 
-        string? chiTietText = null;
-        double? diemNd = null;
-        double? diemHt = null;
-        if (grading.HopLe)
-        {
-            // SumNdHt sẽ "siết" diem_cham dựa vào ly_do (bắt buộc có chứng cứ).
-            var (sumNd, sumHt) = SumNdHt(grading.ChiTiet);
-            diemNd = sumNd;
-            diemHt = sumHt;
-            chiTietText = FormatChiTiet(grading.ChiTiet);
-        }
+        var (diemNd, diemHt, tongComputed, chiTietText) = ResolveScores(grading);
         var tenTp = string.IsNullOrWhiteSpace(grading.TenTacGiaTacPham)
             ? Path.GetFileNameWithoutExtension(fileName)
             : grading.TenTacGiaTacPham.Trim();
-        var nxNoiBat = string.IsNullOrWhiteSpace(grading.NhanXetNoiBat)
+        var nxNoiBatBase = string.IsNullOrWhiteSpace(grading.NhanXetNoiBat)
             ? grading.GhiChuNgan?.Trim()
             : grading.NhanXetNoiBat.Trim();
-
-        var tongComputed = diemNd.HasValue && diemHt.HasValue ? diemNd.Value + diemHt.Value : grading.TongDiem;
+        var nxNoiBat = ComposeHighlightedComment(nxNoiBatBase, grading.NhanXet8_5Plus, tongComputed);
 
         return new GradeResult
         {
@@ -128,6 +120,299 @@ public sealed class GeminiGradingClient : IDisposable
         };
     }
 
+    public async Task<GradeResult> GradeFromImageAsync(
+        string fileName,
+        string criteriaPlainText,
+        byte[] imageBytes,
+        string fileExtension,
+        string apiKey,
+        string model,
+        CancellationToken cancellationToken = default)
+    {
+        var compactCriteria = CompactWhitespace(criteriaPlainText);
+
+        var systemPrompt =
+            "Bạn là giám khảo độc lập chấm bài thi nhận giải — không phải chấm bài học đường. " +
+            "Yêu cầu tuyệt đối: CÔNG TÂM, CHÍNH XÁC, CHẶT CHẼ. Không khích lệ, không nâng điểm vì thương. " +
+            "Chỉ cho điểm cao khi bài THỰC SỰ vượt trội so với đại đa số bài dự thi. " +
+            "Bạn sẽ nhận 1 ảnh scan bài viết (có thể viết tay). " +
+            "Trước hết hãy đọc chính xác nội dung từ ảnh, sau đó chấm điểm. " +
+            "Nếu không đọc rõ một phần, phải chấm bảo thủ (không suy đoán). " +
+            "Chỉ trả về một đối tượng JSON bắt đầu bằng ký tự {. Không markdown, không bọc trong ``` hay ```json, không tiền tố hay giải thích ngoài JSON.";
+
+        var userPrompt = BuildUserPromptForImage(compactCriteria);
+        var normalizedModel = NormalizeModelName(model);
+
+        var mime = NormalizeImageMimeType(fileExtension);
+        var base64 = Convert.ToBase64String(imageBytes);
+
+        var geminiBody = new Dictionary<string, object?>
+        {
+            ["systemInstruction"] = new Dictionary<string, object?>
+            {
+                ["parts"] = new object[]
+                {
+                    new Dictionary<string, string> { ["text"] = systemPrompt }
+                }
+            },
+            ["contents"] = new object[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["role"] = "user",
+                    ["parts"] = new object[]
+                    {
+                        new Dictionary<string, string> { ["text"] = userPrompt },
+                        new Dictionary<string, object?>
+                        {
+                            ["inlineData"] = new Dictionary<string, string>
+                            {
+                                ["mimeType"] = mime,
+                                ["data"] = base64
+                            }
+                        }
+                    }
+                }
+            },
+            ["generationConfig"] = new Dictionary<string, object?>
+            {
+                ["temperature"] = 0,
+                ["topP"] = 1.0,
+                ["seed"] = 42,
+                ["responseMimeType"] = "application/json"
+            }
+        };
+
+        var (respText, usedModel) = await SendGenerateContentWithFallbackAsync(
+            apiKey, normalizedModel, geminiBody, cancellationToken).ConfigureAwait(false);
+
+        using var doc = JsonDocument.Parse(respText);
+        var root = doc.RootElement;
+        var candidates = root.GetProperty("candidates");
+        var content = candidates[0].GetProperty("content").GetProperty("parts")[0].GetProperty("text").GetString()
+                        ?? throw new InvalidOperationException("Gemini không trả nội dung.");
+
+        var jsonPayload = ExtractJsonPayload(content);
+        var grading = JsonSerializer.Deserialize<GradingJson>(jsonPayload, JsonResp)
+                      ?? throw new InvalidOperationException("Model không trả JSON hợp lệ: " + content);
+
+        var (diemNd, diemHt, tongComputed, chiTietText) = ResolveScores(grading);
+
+        var tenTp = string.IsNullOrWhiteSpace(grading.TenTacGiaTacPham)
+            ? Path.GetFileNameWithoutExtension(fileName)
+            : grading.TenTacGiaTacPham.Trim();
+        var nxNoiBatBase = string.IsNullOrWhiteSpace(grading.NhanXetNoiBat)
+            ? grading.GhiChuNgan?.Trim()
+            : grading.NhanXetNoiBat.Trim();
+        var nxNoiBat = ComposeHighlightedComment(nxNoiBatBase, grading.NhanXet8_5Plus, tongComputed);
+
+        return new GradeResult
+        {
+            FileName = fileName,
+            HopLe = grading.HopLe,
+            LyDoKhongHopLe = grading.LyDoNeuKhongHopLe,
+            TongDiem = tongComputed,
+            DiemNoiDung = diemNd,
+            DiemHinhThuc = diemHt,
+            PhanLoai = NormalizePhanLoai(grading.PhanLoai),
+            GhiChu = grading.GhiChuNgan,
+            TenTacGiaTacPham = tenTp,
+            NhanXetNoiBat = nxNoiBat,
+            ChiTietDiemVaLyDo = chiTietText,
+            NhanXetDatTu85 = ShouldIncludeHighScoreComment(grading.HopLe, tongComputed)
+                ? NormalizeHighScoreComment(grading.NhanXet8_5Plus)
+                : null,
+            RawModelJson = $"{{\"used_model\":\"{usedModel}\",\"payload\":{jsonPayload}}}"
+        };
+    }
+
+    public async Task<GradeResult> GradeFromPdfScanAsync(
+        string fileName,
+        string criteriaPlainText,
+        byte[] pdfBytes,
+        string apiKey,
+        string model,
+        CancellationToken cancellationToken = default)
+    {
+        var compactCriteria = CompactWhitespace(criteriaPlainText);
+
+        var systemPrompt =
+            "Bạn là giám khảo độc lập chấm bài thi nhận giải — không phải chấm bài học đường. " +
+            "Yêu cầu tuyệt đối: CÔNG TÂM, CHÍNH XÁC, CHẶT CHẼ. Không khích lệ, không nâng điểm vì thương. " +
+            "Chỉ cho điểm cao khi bài THỰC SỰ vượt trội so với đại đa số bài dự thi. " +
+            "Bạn sẽ nhận 1 file PDF scan (nội dung có thể là ảnh trang viết tay). " +
+            "Trước hết hãy đọc chính xác nội dung từ PDF, sau đó chấm điểm. " +
+            "Nếu không đọc rõ một phần, phải chấm bảo thủ (không suy đoán). " +
+            "Chỉ trả về một đối tượng JSON bắt đầu bằng ký tự {. Không markdown, không bọc trong ``` hay ```json, không tiền tố hay giải thích ngoài JSON.";
+
+        var userPrompt = BuildUserPromptForImage(compactCriteria);
+        var normalizedModel = NormalizeModelName(model);
+        var base64 = Convert.ToBase64String(pdfBytes);
+
+        var geminiBody = new Dictionary<string, object?>
+        {
+            ["systemInstruction"] = new Dictionary<string, object?>
+            {
+                ["parts"] = new object[]
+                {
+                    new Dictionary<string, string> { ["text"] = systemPrompt }
+                }
+            },
+            ["contents"] = new object[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["role"] = "user",
+                    ["parts"] = new object[]
+                    {
+                        new Dictionary<string, string> { ["text"] = userPrompt },
+                        new Dictionary<string, object?>
+                        {
+                            ["inlineData"] = new Dictionary<string, string>
+                            {
+                                ["mimeType"] = "application/pdf",
+                                ["data"] = base64
+                            }
+                        }
+                    }
+                }
+            },
+            ["generationConfig"] = new Dictionary<string, object?>
+            {
+                ["temperature"] = 0,
+                ["topP"] = 1.0,
+                ["seed"] = 42,
+                ["responseMimeType"] = "application/json"
+            }
+        };
+
+        var (respText, usedModel) = await SendGenerateContentWithFallbackAsync(
+            apiKey, normalizedModel, geminiBody, cancellationToken).ConfigureAwait(false);
+
+        using var doc = JsonDocument.Parse(respText);
+        var root = doc.RootElement;
+        var candidates = root.GetProperty("candidates");
+        var content = candidates[0].GetProperty("content").GetProperty("parts")[0].GetProperty("text").GetString()
+                        ?? throw new InvalidOperationException("Gemini không trả nội dung.");
+
+        var jsonPayload = ExtractJsonPayload(content);
+        var grading = JsonSerializer.Deserialize<GradingJson>(jsonPayload, JsonResp)
+                      ?? throw new InvalidOperationException("Model không trả JSON hợp lệ: " + content);
+
+        var (diemNd, diemHt, tongComputed, chiTietText) = ResolveScores(grading);
+
+        var tenTp = string.IsNullOrWhiteSpace(grading.TenTacGiaTacPham)
+            ? Path.GetFileNameWithoutExtension(fileName)
+            : grading.TenTacGiaTacPham.Trim();
+        var nxNoiBatBase = string.IsNullOrWhiteSpace(grading.NhanXetNoiBat)
+            ? grading.GhiChuNgan?.Trim()
+            : grading.NhanXetNoiBat.Trim();
+        var nxNoiBat = ComposeHighlightedComment(nxNoiBatBase, grading.NhanXet8_5Plus, tongComputed);
+
+        return new GradeResult
+        {
+            FileName = fileName,
+            HopLe = grading.HopLe,
+            LyDoKhongHopLe = grading.LyDoNeuKhongHopLe,
+            TongDiem = tongComputed,
+            DiemNoiDung = diemNd,
+            DiemHinhThuc = diemHt,
+            PhanLoai = NormalizePhanLoai(grading.PhanLoai),
+            GhiChu = grading.GhiChuNgan,
+            TenTacGiaTacPham = tenTp,
+            NhanXetNoiBat = nxNoiBat,
+            ChiTietDiemVaLyDo = chiTietText,
+            NhanXetDatTu85 = ShouldIncludeHighScoreComment(grading.HopLe, tongComputed)
+                ? NormalizeHighScoreComment(grading.NhanXet8_5Plus)
+                : null,
+            RawModelJson = $"{{\"used_model\":\"{usedModel}\",\"payload\":{jsonPayload}}}"
+        };
+    }
+
+    private static (double? diemNd, double? diemHt, double? tongDiem, string? chiTietText) ResolveScores(GradingJson grading)
+    {
+        if (!grading.HopLe)
+            return (null, null, null, null);
+
+        // Backward-compatible: nếu model cũ vẫn trả chi_tiet thì vẫn đọc được.
+        if (grading.ChiTiet is { Length: > 0 })
+        {
+            var (sumNd, sumHt) = SumNdHt(grading.ChiTiet);
+            return (sumNd, sumHt, sumNd + sumHt, null);
+        }
+
+        var nd = ClampNullable(grading.DiemNoiDung, 0, 6);
+        var ht = ClampNullable(grading.DiemHinhThuc, 0, 4);
+        var tong = nd.HasValue && ht.HasValue
+            ? nd.Value + ht.Value
+            : ClampNullable(grading.TongDiem, 0, 10);
+        return (nd, ht, tong, null);
+    }
+
+    private static double? ClampNullable(double? v, double min, double max)
+    {
+        if (!v.HasValue)
+            return null;
+        return Math.Max(min, Math.Min(max, v.Value));
+    }
+
+    private static string? ComposeHighlightedComment(string? baseComment, string? highScoreDetail, double? tongDiem)
+    {
+        var basePart = string.IsNullOrWhiteSpace(baseComment) ? null : baseComment.Trim();
+        var detailPart = string.IsNullOrWhiteSpace(highScoreDetail) ? null : highScoreDetail.Trim();
+        var isHighScore = tongDiem.HasValue && tongDiem.Value >= 8.5;
+
+        if (!isHighScore)
+            return basePart;
+        if (string.IsNullOrWhiteSpace(detailPart))
+            return basePart;
+        if (string.IsNullOrWhiteSpace(basePart))
+            return detailPart;
+
+        return $"{basePart}{Environment.NewLine}{Environment.NewLine}Chi tiết lý do cho điểm từng mục:{Environment.NewLine}{detailPart}";
+    }
+
+    /// <summary>
+    /// Floor về bậc điểm hợp lệ thấp nhất ≤ v cho hạng mục ma.
+    /// Nếu model trả giá trị trung gian (ví dụ 1.8 thay vì 1.5 hoặc 2.0) → luôn floor xuống bậc thấp hơn.
+    /// </summary>
+    private static double SnapToAllowedStep(double v, string ma)
+    {
+        double[] steps = GetAllowedSteps(ma);
+        if (steps.Length == 0)
+            return Math.Max(0, v);
+
+        // Floor: chọn bậc cao nhất ≤ v (bảo thủ — không làm tròn lên).
+        var snapped = steps.Where(s => s <= v + 1e-9).DefaultIfEmpty(0).Max();
+        return snapped;
+    }
+
+    private static double[] GetAllowedSteps(string ma)
+    {
+        if (string.IsNullOrWhiteSpace(ma)) return Array.Empty<double>();
+
+        if (Regex.IsMatch(ma, @"^(I\.?|1\.)(1)$", RegexOptions.IgnoreCase))
+            return new[] { 0.0, 0.5, 1.0, 1.5, 2.0 };
+        if (Regex.IsMatch(ma, @"^(I\.?|1\.)(2)$", RegexOptions.IgnoreCase))
+            return new[] { 0.0, 0.25, 0.5, 0.75, 1.0 };
+        if (Regex.IsMatch(ma, @"^(I\.?|1\.)(3)$", RegexOptions.IgnoreCase))
+            return new[] { 0.0, 0.5, 1.0, 1.25, 1.5 };
+        if (Regex.IsMatch(ma, @"^(I\.?|1\.)(4)$", RegexOptions.IgnoreCase))
+            return new[] { 0.0, 0.25, 0.5, 0.75, 1.0 };
+        if (Regex.IsMatch(ma, @"^(I\.?|1\.)(5)$", RegexOptions.IgnoreCase))
+            return new[] { 0.0, 0.25, 0.5 };
+        if (Regex.IsMatch(ma, @"^(II\.?|2\.)(1)$", RegexOptions.IgnoreCase))
+            return new[] { 0.0, 0.5, 1.0, 1.25, 1.5 };
+        if (Regex.IsMatch(ma, @"^(II\.?|2\.)(2)$", RegexOptions.IgnoreCase))
+            return new[] { 0.0, 0.25, 0.5, 0.75, 1.0 };
+        if (Regex.IsMatch(ma, @"^(II\.?|2\.)(3)$", RegexOptions.IgnoreCase))
+            return new[] { 0.0, 0.25, 0.5 };
+        if (Regex.IsMatch(ma, @"^(II\.?|2\.)(4)$", RegexOptions.IgnoreCase))
+            return new[] { 0.0, 1.0 };
+
+        return Array.Empty<double>();
+    }
+
     private static (double nd, double ht) SumNdHt(ChiTietItem[]? items)
     {
         if (items == null || items.Length == 0)
@@ -144,7 +429,12 @@ public sealed class GeminiGradingClient : IDisposable
 
             var v0 = it.DiemCham.Value;
             var maxForItem = it.DiemToiDa ?? GetMaxForItemByMa(ma);
-            var v = ApplyEvidenceTightening(v0, maxForItem, it.LyDo, ma);
+
+            // Bước 1: snap về bậc hợp lệ (floor — không làm tròn lên).
+            var vSnapped = SnapToAllowedStep(v0, ma);
+
+            // Bước 2: siết thêm theo bằng chứng trích dẫn trong ly_do.
+            var v = ApplyEvidenceTightening(vSnapped, maxForItem, it.LyDo, ma);
             it.DiemCham = v;
 
             // Hỗ trợ cả 2 format ma: mới (I.1/II.1) và cũ (1.1/2.1).
@@ -208,6 +498,10 @@ public sealed class GeminiGradingClient : IDisposable
         return 0;
     }
 
+    /// <summary>
+    /// Chi ap dung 2 quy tac cung, tranh phan tich text phuc tap gay instability.
+    /// Kiem soat bac diem chu yeu qua SnapToAllowedStep; kiem soat muc diem qua prompt anchoring.
+    /// </summary>
     private static double ApplyEvidenceTightening(double v, double maxForItem, string? lyDo, string ma)
     {
         if (maxForItem <= 0)
@@ -215,60 +509,21 @@ public sealed class GeminiGradingClient : IDisposable
 
         v = Math.Max(0, Math.Min(v, maxForItem));
 
-        var longestQuoteLen = GetLongestEvidenceQuoteLength(lyDo);
-        var hasSufficientEvidence = longestQuoteLen >= 10; // phải có đoạn trích trực tiếp đủ dài
-
-        // I.5 (bài học) và II.4 (thông điệp <= 30 từ) rất dễ bị chấm cao khi thiếu chứng cứ.
-        var isI5 = Regex.IsMatch(ma, @"^(I\.?|1\.)(5)$", RegexOptions.IgnoreCase);
+        var lyDoLen = lyDo?.Trim().Length ?? 0;
+        var isI5  = Regex.IsMatch(ma, @"^(I\.?|1\.)(5)$",  RegexOptions.IgnoreCase);
         var isII4 = Regex.IsMatch(ma, @"^(II\.?|2\.)(4)$", RegexOptions.IgnoreCase);
 
-        if (!hasSufficientEvidence)
-        {
-            if (isI5 || isII4)
-                return 0; // không có câu trích rõ ràng => bắt buộc 0
+        // I.5 (bai hoc): bat buoc 0 neu ly_do qua ngan -- khong co giai thich cu the ve bai hoc.
+        if (isI5 && lyDoLen < 15)
+            return 0;
 
-            // Thiếu chứng cứ => hạ mạnh (cắt trần còn 35% max).
-            return Math.Min(v, maxForItem * 0.35);
-        }
-
-        // Có chứng cứ rồi, nhưng nếu model cố cho gần sát max thì yêu cầu đoạn trích dài hơn.
-        if (v >= maxForItem * 0.9 && longestQuoteLen < 25)
-            v = Math.Min(v, maxForItem * 0.7);
-        else if (v >= maxForItem * 0.75 && longestQuoteLen < 15)
-            v = Math.Min(v, maxForItem * 0.6);
+        // II.4 (thong diep): da snap ve 0/1.0 boi SnapToAllowedStep.
+        // Bat buoc 0 neu ly_do khong mo ta duoc gi (model khong tim thay thong diep).
+        if (isII4 && lyDoLen < 10)
+            return 0;
 
         return v;
     }
-
-    private static int GetLongestEvidenceQuoteLength(string? lyDo)
-    {
-        if (string.IsNullOrWhiteSpace(lyDo))
-            return 0;
-
-        // Accept both straight quotes "..." and smart quotes “...”.
-        var matches1 = Regex.Matches(lyDo, "\"([^\"]+)\"");
-        var matches2 = Regex.Matches(lyDo, "“([^”]+)”");
-
-        var best = 0;
-        foreach (Match m in matches1)
-        {
-            if (!m.Success)
-                continue;
-            var s = m.Groups[1].Value?.Trim() ?? "";
-            best = Math.Max(best, s.Length);
-        }
-
-        foreach (Match m in matches2)
-        {
-            if (!m.Success)
-                continue;
-            var s = m.Groups[1].Value?.Trim() ?? "";
-            best = Math.Max(best, s.Length);
-        }
-
-        return best;
-    }
-
     private async Task<(string responseText, string usedModel)> SendGenerateContentWithFallbackAsync(
         string apiKey,
         string model,
@@ -427,7 +682,7 @@ public sealed class GeminiGradingClient : IDisposable
     }
 
     private static bool ShouldIncludeHighScoreComment(bool hopLe, double? tongDiem)
-        => hopLe && tongDiem.HasValue && tongDiem.Value > 8.5;
+        => hopLe && tongDiem.HasValue && tongDiem.Value >= 8.0;
 
     private static string? NormalizeHighScoreComment(string? s)
     {
@@ -524,19 +779,27 @@ public sealed class GeminiGradingClient : IDisposable
 {
   "hop_le": <boolean>,
   "ly_do_neu_khong_hop_le": <string hoặc null>,
-  "tong_diem": <số 0–10 hoặc null nếu không hợp lệ>,
-  "diem_noi_dung": <tổng nhóm I., tối đa 6, hoặc null nếu không hợp lệ>,
-  "diem_hinh_thuc": <tổng nhóm II., tối đa 4, hoặc null nếu không hợp lệ>,
-  "ten_tac_gia_tac_pham": <string ngắn: ví dụ "Nguyễn Văn A (Tựa bài)" hoặc chỉ tựa — phục vụ bảng tổng hợp>,
+  "tong_diem": <tổng = sum(chi_tiet.diem_cham), 0–10, null nếu không hợp lệ>,
+  "diem_noi_dung": <tổng I.1…I.5 từ chi_tiet, tối đa 6, null nếu không hợp lệ>,
+  "diem_hinh_thuc": <tổng II.1…II.4 từ chi_tiet, tối đa 4, null nếu không hợp lệ>,
+  "chi_tiet": [
+    {"ma":"I.1","diem_toi_da":2.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn ngắn trực tiếp từ bài>"},
+    {"ma":"I.2","diem_toi_da":1.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"I.3","diem_toi_da":1.5,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"I.4","diem_toi_da":1.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"I.5","diem_toi_da":0.5,"diem_cham":<0|0.25|0.5>,"ly_do":"<trích dẫn hoặc null nếu 0>"},
+    {"ma":"II.1","diem_toi_da":1.5,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"II.2","diem_toi_da":1.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"II.3","diem_toi_da":0.5,"diem_cham":<0|0.25|0.5>,"ly_do":"<mô tả bố cục>"},
+    {"ma":"II.4","diem_toi_da":1.0,"diem_cham":<0|1.0>,"ly_do":"<trích nguyên văn thông điệp + số từ đếm được>"}
+  ],
+  "ten_tac_gia_tac_pham": <string: ví dụ "Nguyễn Văn A (Tựa bài)" hoặc chỉ tựa — phục vụ bảng tổng hợp>,
   "phan_loai": <một trong: "Trung binh"|"Kha"|"Gioi"|null>,
-  "ghi_chu_ngan": <string ngắn>,
-  "nhan_xet_noi_bat": <nhận xét nổi bật cho cột cuối bảng: phải nêu rõ đạt/thiếu phần thông điệp ≤30 từ nếu có>,
+  "ghi_chu_ngan": <nhận xét tóm tắt 2-4 câu, nêu rõ điểm mạnh/yếu chính>,
+  "nhan_xet_noi_bat": <nhận xét nổi bật 3-6 câu, cụ thể và có dẫn chứng ngắn; nêu rõ đạt/thiếu phần thông điệp ≤30 từ nếu có>,
   "so_tu_thong_diep": <số từ của phần thông điệp nếu xác định được; null nếu không có hoặc không rõ>,
-  "chi_tiet": <mảng có đúng 9 phần tử khi hop_le=true, hoặc [] khi hop_le=false>,
   "nhan_xet_8_5_plus": <string nhiều dòng hoặc null>
 }
-
-Mỗi phần tử "chi_tiet": { "ma": "I.1", "ten": "...", "diem_toi_da": <số>, "diem_cham": <số>, "ly_do": "..." }
 
 Thứ tự và mã BẮT BUỘC khi hop_le=true (Bước 2 — thang 10 điểm):
 I. NỘI DUNG (tối đa 6):
@@ -563,24 +826,50 @@ Tiêu chí phụ (không cộng điểm, chỉ ghi nhận trong ly_do nếu cầ
 ---
 
 Nhiệm vụ:
-1) Áp dụng Bước 1: nếu bài thuộc một trong các trường hợp KHÔNG HỢP LỆ trong tiêu chí (ví dụ: không phải văn xuôi tiếng Việt, sai chủ đề, quá 1500 từ phần nội dung, nhóm tác giả, vi phạm đạo đức/pháp luật, sai định dạng theo thể lệ, v.v.) thì hop_le=false, nêu ly_do_neu_khong_hop_le cụ thể, chi_tiet=[], tong_diem/diem_noi_dung/diem_hinh_thuc null.
-2) Nếu HỢP LỆ: chấm Bước 2 đủ 9 hạng mục I.1…II.4 như trên. Tổng diem_cham phải bằng tong_diem (sai số làm tròn tối đa 0.1). diem_noi_dung = tổng I.1…I.5 (≤6), diem_hinh_thuc = tổng II.1…II.4 (≤4). Tong_diem = diem_noi_dung + diem_hinh_thuc.
-3) Đối với II.4: tự tìm trong bài phần được coi là "thông điệp" (thường đoạn kết/câu tóm tắt có nhãn hoặc rõ ý kết luận). Đếm số từ; nếu không có hoặc >30 từ thì diem_cham của II.4 = 0.
-4) Khi hop_le=true và tong_diem > 8.5: điền nhan_xet_8_5_plus chi tiết nhiều dòng (Lý do / Nhận xét); ngược lại null.
-5) nhan_xet_noi_bat và ghi_chu_ngan: ngắn gọn, phù hợp cột "Nhận xét nổi bật" trong báo cáo.
+1) Áp dụng Bước 1: nếu bài thuộc một trong các trường hợp KHÔNG HỢP LỆ trong tiêu chí (ví dụ: không phải văn xuôi tiếng Việt, sai chủ đề, nhóm tác giả, vi phạm đạo đức/pháp luật, v.v.) thì hop_le=false, nêu ly_do_neu_khong_hop_le cụ thể, tong_diem/diem_noi_dung/diem_hinh_thuc/chi_tiet null.
+2) Nếu HỢP LỆ: BẮT BUỘC trả đủ mảng "chi_tiet" gồm 9 phần tử I.1…II.4. Mỗi phần tử phải có diem_cham ĐÚNG BẬC (xem bảng bậc điểm bên dưới) và ly_do có TRÍCH DẪN NGẮN trực tiếp từ bài (đặt trong dấu ngoặc kép). diem_noi_dung = tổng I.1…I.5, diem_hinh_thuc = tổng II.1…II.4, tong_diem = tổng cộng.
+3) Đối với II.4: tự tìm trong bài phần được coi là "thông điệp" (thường đoạn kết/câu tóm tắt có nhãn hoặc rõ ý kết luận). Đếm số từ; nếu không có hoặc >30 từ thì diem_cham của II.4 = 0, ly_do phải ghi rõ lý do (không có / bao nhiêu từ đếm được).
+4) Khi hop_le=true và tong_diem >= 8.0: điền nhan_xet_8_5_plus chi tiết theo TỪNG MỤC I.1 đến II.4 (mỗi mục 1 dòng ngắn nêu vì sao cho mức điểm đó); ngược lại null.
+5) nhan_xet_noi_bat và ghi_chu_ngan phải chi tiết:
+   - ghi_chu_ngan: 2-4 câu, có ít nhất 1 điểm mạnh + 1 điểm cần cải thiện.
+   - nhan_xet_noi_bat: 3-6 câu, nêu rõ lý do điểm ND/HT, diễn đạt cụ thể theo bài.
 
-Quy tắc CHẤM BẢO THỦ (nhằm tránh chấm cao quá):
-- Chỉ cho mức điểm "cao" nếu trong bài có minh chứng trực tiếp khớp mô tả hạng mục. Nếu chỉ là suy đoán/khái quát chung -> chấm mức thấp hơn.
-- Khi không đủ chắc (thiếu dữ kiện, thiếu chi tiết chứng minh, hoặc luận điểm mơ hồ) => chọn mức thấp hơn thay vì đoán.
-- I.5 và II.4 thường dễ bị chấm cao: chỉ chấm >0 điểm khi có kết luận/bài học/thông điệp rõ ràng, tách biệt với phần kể lể.
-- II.1: nếu có lỗi chính tả/ngữ pháp nhiều, câu thiếu cấu trúc, hoặc diễn đạt khó hiểu -> không vượt quá 1.0.
-- II.3: nếu bố cục/logic trình bày rời rạc, ý nhảy cóc -> chấm thấp (có thể 0).
-- II.4: nếu không tìm được "thông điệp" rõ ràng hoặc không thể xác định ranh giới phần thông điệp -> coi như không đạt và chấm 0.
+BẢNG NEO ĐIỂM — bắt buộc tuân thủ (đây là cuộc thi có giải thưởng, không phải chấm bài học đường):
+Phân phối kỳ vọng thực tế (phần lớn bài dự thi sẽ rơi vào mức trung bình):
+  tong_diem  2–5   : bài yếu đến trung bình (PHẦN LỚN bài dự thi)
+  tong_diem  5–6.5 : bài khá (thiểu số)
+  tong_diem  6.5–8 : bài tốt (thiểu số nhỏ)
+  tong_diem  >8    : bài xuất sắc thực sự (cực kỳ hiếm — top ~3%, chỉ dành bài vượt trội mọi mặt)
 
-Quy tắc "bắt buộc có chứng cứ" để giảm dao động giữa các mô hình:
-- Trong trường "ly_do" của mỗi hạng mục, bắt buộc ghi kèm 1 câu trích từ bài (đặt trong dấu ngoặc kép) sao cho phù hợp với quyết định chấm điểm.
-- Nếu không có câu trích cụ thể (hoặc chỉ diễn giải chung) thì model phải giảm điểm ít nhất 50% so với mức tối đa của hạng mục đó.
-- Với I.5 và II.4: nếu không có câu trích/câu kết luận đủ rõ ràng để xác định bài học/thông điệp (<= 30 từ) thì diem_cham của hạng mục đó phải = 0.
+Bậc điểm cho phép của từng mục (chỉ dùng đúng các mốc này, không làm tròn trung gian):
+  I.1 (tối đa 2.0): 0 / 0.5 / 1.0 / 1.5 / 2.0
+  I.2 (tối đa 1.0): 0 / 0.25 / 0.5 / 0.75 / 1.0
+  I.3 (tối đa 1.5): 0 / 0.5 / 1.0 / 1.25 / 1.5
+  I.4 (tối đa 1.0): 0 / 0.25 / 0.5 / 0.75 / 1.0
+  I.5 (tối đa 0.5): 0 / 0.25 / 0.5
+  II.1 (tối đa 1.5): 0 / 0.5 / 1.0 / 1.25 / 1.5
+  II.2 (tối đa 1.0): 0 / 0.25 / 0.5 / 0.75 / 1.0
+  II.3 (tối đa 0.5): 0 / 0.25 / 0.5
+  II.4 (tối đa 1.0): 0 / 1.0  (chỉ 2 mức: không đạt = 0, đạt đủ điều kiện = 1.0)
+
+Mức "trung bình điển hình" cho bài bình thường (ĐIỂM NÉO DƯỚI — bài bình thường không được vượt quá mức này nếu không có lý do thuyết phục):
+  I.1=0.5  I.2=0.25  I.3=0.5  I.4=0.25  I.5=0  → diem_noi_dung ≈ 1.5
+  II.1=1.0  II.2=0.25  II.3=0.25  II.4=0  → diem_hinh_thuc ≈ 1.5
+  Bài phải VƯỢT RÕ RỆT và CÓ BẰNG CHỨNG CỤ THỂ mới được chấm cao hơn mức này.
+
+Quy tắc CHẤM NGHIÊM KHẮC cho cuộc thi nhận giải:
+- ĐÂY LÀ THI NHẬN GIẢI: tiêu chuẩn PHẢI cao hơn bài học đường. Bài "bình thường, ổn" → chấm thấp (≤4.5). Cần lý do RÕ RÀNG để vượt 5.0.
+- TUYỆT ĐỐI KHÔNG nâng điểm để khích lệ. Nhận xét trung thực, chỉ ra điểm yếu cụ thể dù bài cố gắng.
+- Chỉ tăng điểm lên bậc cao hơn khi có lý do CỤ THỂ, THUYẾT PHỤC từ bài. Nếu chỉ "có vẻ ổn" thì giữ mức thấp.
+- Mặc định nghi ngờ: nếu không chắc thì chấm thấp, không chấm cao rồi giải thích sau.
+- I.1: bài chỉ kể chuyện bữa cơm đơn giản, không có chiều sâu → tối đa 0.5. Phải có sáng tạo/góc nhìn độc đáo mới lên 1.5–2.0.
+- I.3: cảm xúc phải CHÂN THỰC, không hoa mỹ rỗng. Văn hoa nhưng thiếu cảm xúc thật → tối đa 0.5.
+- I.5 và II.4: chỉ chấm >0 khi bài học/thông điệp TÁCH BIỆT rõ khỏi phần kể, không lẫn vào nội dung.
+- II.1: trừ điểm mạnh tay cho lỗi chính tả, diễn đạt vòng vo, câu thiếu chủ/vị. Mức 1.25–1.5 chỉ dành bài viết gần như không lỗi.
+- II.2: tu từ/hình ảnh phải CÓ HIỆU QUẢ THỰC SỰ, không chỉ sử dụng cho có. Mức 0.75–1.0 rất hiếm.
+- II.3: bài không chia đoạn rõ hoặc ý lộn xộn → tối đa 0.25.
+- II.4: chỉ 2 mức: 0 (không có thông điệp rõ hoặc >30 từ) hoặc 1.0 (đúng định dạng, ≤30 từ).
+- Chứng cứ yếu/mơ hồ → chấm bậc thấp hơn, không đoán.
 
 Trả về ĐÚNG một đối tượng JSON (không thêm khóa ngoài schema). Ví dụ cấu trúc:
 {jsonShape}
@@ -592,6 +881,94 @@ Nội dung bài dự thi:
 {essay}
 ---
 """;
+    }
+
+    private static string BuildUserPromptForImage(string criteriaPlainText)
+    {
+        const string jsonShape = """
+{
+  "hop_le": <boolean>,
+  "ly_do_neu_khong_hop_le": <string hoặc null>,
+  "tong_diem": <tổng = sum(chi_tiet.diem_cham), 0–10, null nếu không hợp lệ>,
+  "diem_noi_dung": <tổng I.1…I.5 từ chi_tiet, tối đa 6, null nếu không hợp lệ>,
+  "diem_hinh_thuc": <tổng II.1…II.4 từ chi_tiet, tối đa 4, null nếu không hợp lệ>,
+  "chi_tiet": [
+    {"ma":"I.1","diem_toi_da":2.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn ngắn từ bài>"},
+    {"ma":"I.2","diem_toi_da":1.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"I.3","diem_toi_da":1.5,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"I.4","diem_toi_da":1.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"I.5","diem_toi_da":0.5,"diem_cham":<0|0.25|0.5>,"ly_do":"<trích dẫn hoặc null nếu 0>"},
+    {"ma":"II.1","diem_toi_da":1.5,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"II.2","diem_toi_da":1.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"II.3","diem_toi_da":0.5,"diem_cham":<0|0.25|0.5>,"ly_do":"<mô tả bố cục>"},
+    {"ma":"II.4","diem_toi_da":1.0,"diem_cham":<0|1.0>,"ly_do":"<trích nguyên văn thông điệp + số từ đếm được>"}
+  ],
+  "ten_tac_gia_tac_pham": <string: ví dụ "Nguyễn Văn A (Tựa bài)" hoặc chỉ tựa — phục vụ bảng tổng hợp>,
+  "phan_loai": <một trong: "Trung binh"|"Kha"|"Gioi"|null>,
+  "ghi_chu_ngan": <nhận xét tóm tắt 2-4 câu, nêu rõ điểm mạnh/yếu chính>,
+  "nhan_xet_noi_bat": <nhận xét nổi bật 3-6 câu, cụ thể và có dẫn chứng ngắn; nêu rõ đạt/thiếu phần thông điệp ≤30 từ nếu có>,
+  "so_tu_thong_diep": <số từ của phần thông điệp nếu xác định được; null nếu không có hoặc không rõ>,
+  "nhan_xet_8_5_plus": <string nhiều dòng hoặc null>
+}
+""";
+
+        return $"""
+ẢNH ĐÍNH KÈM là bài dự thi (scan, có thể viết tay). Trước khi chấm, hãy đọc nội dung từ ảnh.
+
+Áp dụng CHÍNH XÁC bộ tiêu chí sau (tài liệu chấm điểm — gồm Bước 1 loại bài không hợp lệ và Bước 2 chấm điểm):
+
+---
+{criteriaPlainText}
+---
+
+BẢNG NEO ĐIỂM — bắt buộc tuân thủ (đây là cuộc thi có giải thưởng, không phải chấm bài học đường):
+Phân phối kỳ vọng thực tế (phần lớn bài dự thi sẽ rơi vào mức trung bình):
+  tong_diem  2–5   : bài yếu đến trung bình (PHẦN LỚN bài dự thi)
+  tong_diem  5–6.5 : bài khá (thiểu số)
+  tong_diem  6.5–8 : bài tốt (thiểu số nhỏ)
+  tong_diem  >8    : bài xuất sắc thực sự (cực kỳ hiếm — top ~3%)
+
+Bậc điểm cho phép của từng mục (chỉ dùng ĐÚNG CÁC MỐC NÀY — không được dùng giá trị trung gian):
+  I.1 (tối đa 2.0): 0 / 0.5 / 1.0 / 1.5 / 2.0
+  I.2 (tối đa 1.0): 0 / 0.25 / 0.5 / 0.75 / 1.0
+  I.3 (tối đa 1.5): 0 / 0.5 / 1.0 / 1.25 / 1.5
+  I.4 (tối đa 1.0): 0 / 0.25 / 0.5 / 0.75 / 1.0
+  I.5 (tối đa 0.5): 0 / 0.25 / 0.5
+  II.1 (tối đa 1.5): 0 / 0.5 / 1.0 / 1.25 / 1.5
+  II.2 (tối đa 1.0): 0 / 0.25 / 0.5 / 0.75 / 1.0
+  II.3 (tối đa 0.5): 0 / 0.25 / 0.5
+  II.4 (tối đa 1.0): 0 hoặc 1.0 (chỉ 2 mức — không được dùng giá trị khác)
+
+Mức "trung bình điển hình" (ĐIỂM NÉO DƯỚI — không vượt nếu không có lý do thuyết phục):
+  I.1=0.5  I.2=0.25  I.3=0.5  I.4=0.25  I.5=0  | II.1=1.0  II.2=0.25  II.3=0.25  II.4=0
+  Bài phải VƯỢT RÕ RỆT và CÓ BẰNG CHỨNG CỤ THỂ mới được chấm cao hơn mức này.
+
+Yêu cầu:
+1) Nếu không đọc đủ rõ nội dung để kết luận, phải chấm bảo thủ: giảm điểm, hoặc hop_le=false kèm lý do.
+2) Khi hop_le=true: BẮT BUỘC trả đủ mảng "chi_tiet" gồm 9 phần tử I.1…II.4. Mỗi phần tử phải có diem_cham ĐÚNG BẬC và ly_do có TRÍCH DẪN NGẮN trực tiếp từ bài (đặt trong dấu ngoặc kép). diem_noi_dung = tổng I.1…I.5, diem_hinh_thuc = tổng II.1…II.4, tong_diem = tổng cộng.
+3) II.4: phải xác định rõ phần "thông điệp" và đếm số từ; nếu không có hoặc >30 từ => II.4 = 0. Ghi rõ số từ đếm được trong ly_do.
+4) nhan_xet_noi_bat phải dài 3-6 câu; ghi_chu_ngan dài 2-4 câu, cụ thể theo bài, phải nêu được điểm yếu cụ thể.
+5) Nếu tong_diem >= 8.0 thì nhan_xet_8_5_plus phải ghi rõ lý do cho điểm từng mục I.1…II.4 (mỗi mục một dòng ngắn).
+6) TUYỆT ĐỐI không nâng điểm để khích lệ. Đây là thi nhận giải — chỉ có bài THỰC SỰ xuất sắc mới được điểm cao.
+7) Bài "bình thường, ổn, không có lỗi lớn" → chấm trung bình (≤4.5). Cần lý do RÕ RÀNG để vượt 5.0.
+8) Chấm bảo thủ: mặc định nghi ngờ, không tăng điểm khi không có lý do cụ thể từ bài. Nếu không đọc đủ rõ → chấm thấp.
+
+Trả về ĐÚNG một đối tượng JSON (không thêm khóa ngoài schema). Ví dụ cấu trúc:
+{jsonShape}
+""";
+    }
+
+    private static string NormalizeImageMimeType(string fileExtension)
+    {
+        var ext = (fileExtension ?? "").Trim().ToLowerInvariant();
+        return ext switch
+        {
+            ".png" => "image/png",
+            ".jpg" => "image/jpeg",
+            ".jpeg" => "image/jpeg",
+            ".webp" => "image/webp",
+            _ => "application/octet-stream"
+        };
     }
 
     public void Dispose() => _http.Dispose();

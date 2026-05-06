@@ -86,7 +86,7 @@ public partial class Form1 : Form
                 .Where(p =>
                 {
                     var ext = Path.GetExtension(p).ToLowerInvariant();
-                    return ext is ".docx" or ".pdf";
+                    return ext is ".docx" or ".pdf" or ".png" or ".jpg" or ".jpeg" or ".webp";
                 })
                 .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -113,21 +113,51 @@ public partial class Form1 : Form
                 try
                 {
                     TraceLogger.Write("  Extracting essay...");
-                    var essay = DocumentTextExtractor.Extract(path);
-                    if (string.IsNullOrWhiteSpace(essay))
-                        throw new InvalidOperationException("Không trích được nội dung (file rỗng hoặc không đọc được).");
+                    var ext = Path.GetExtension(path).ToLowerInvariant();
+                    var isImage = ext is ".png" or ".jpg" or ".jpeg" or ".webp";
+                    var isPdf = ext == ".pdf";
+                    var isPdfScanNoText = false;
 
-                    var pre = PreScreener.Screen(path, essay);
-                    var fmtMsg = pre.FormatChecked == true
-                        ? (pre.FormatOk == true
-                            ? "định dạng OK (14pt)"
-                            : $"định dạng SAI (/{(pre.FontSizeDominantPt?.ToString() ?? "?")}pt)")
-                        : "định dạng không kiểm (PDF)";
-                    Log($"  Bước 1: {pre.WordCount} từ; {fmtMsg}.");
-                    TraceLogger.Write(
-                        $"  Pre-screen: hopLe={pre.HopLe} words={pre.WordCount} font={pre.FontDominant} sizePt={pre.FontSizeDominantPt} formatOk={pre.FormatOk}");
+                    string essay = "";
+                    if (!isImage)
+                    {
+                        essay = DocumentTextExtractor.Extract(path);
+                        if (string.IsNullOrWhiteSpace(essay))
+                        {
+                            if (isPdf)
+                            {
+                                isPdfScanNoText = true;
+                                Log("  PDF không có text layer -> chuyển sang chấm trực tiếp từ PDF scan.");
+                                TraceLogger.Write("  PDF no text-layer, fallback to multimodal PDF grading.");
+                            }
+                            else
+                            {
+                                throw new InvalidOperationException("Không trích được nội dung (file rỗng hoặc không đọc được).");
+                            }
+                        }
+                    }
 
-                    if (!pre.HopLe)
+                    PreScreeningResult? pre = null;
+                    if (!isImage && !isPdfScanNoText)
+                    {
+                        pre = PreScreener.Screen(path, essay);
+                        var fmtMsg = pre.FormatChecked == true
+                            ? (pre.FormatOk == true
+                                ? "định dạng OK (14pt)"
+                                : $"định dạng SAI (/{(pre.FontSizeDominantPt?.ToString() ?? "?")}pt)")
+                            : "định dạng không kiểm (PDF)";
+                        Log($"  Bước 1: {pre.WordCount} từ; {fmtMsg}.");
+                        TraceLogger.Write(
+                            $"  Pre-screen: hopLe={pre.HopLe} words={pre.WordCount} font={pre.FontDominant} sizePt={pre.FontSizeDominantPt} formatOk={pre.FormatOk}");
+                    }
+                    else
+                    {
+                        var reason = isImage ? "ảnh scan viết tay" : "PDF scan không có text layer";
+                        Log($"  Bước 1: bỏ qua ({reason}).");
+                        TraceLogger.Write("  Pre-screen: skipped (" + reason + ")");
+                    }
+
+                    if (pre is { HopLe: false })
                     {
                         var lyDo = string.Join(" ", pre.LyDo);
                         Log($"  -> Bước 1 LOẠI: {lyDo}");
@@ -148,10 +178,30 @@ public partial class Form1 : Form
                         continue;
                     }
 
-                    TraceLogger.Write("  Calling model (essayLen=" + essay.Length + ")");
-                    var grade = await _gemini
-                        .GradeAsync(name, criteriaText, essay, apiKey, model, cts.Token)
-                        .ConfigureAwait(true);
+                    GradeResult grade;
+                    if (isImage)
+                    {
+                        TraceLogger.Write("  Calling model (image)...");
+                        var bytes = await File.ReadAllBytesAsync(path, cts.Token).ConfigureAwait(true);
+                        grade = await _gemini
+                            .GradeFromImageAsync(name, criteriaText, bytes, ext, apiKey, model, cts.Token)
+                            .ConfigureAwait(true);
+                    }
+                    else if (isPdfScanNoText)
+                    {
+                        TraceLogger.Write("  Calling model (pdf-scan)...");
+                        var pdfBytes = await File.ReadAllBytesAsync(path, cts.Token).ConfigureAwait(true);
+                        grade = await _gemini
+                            .GradeFromPdfScanAsync(name, criteriaText, pdfBytes, apiKey, model, cts.Token)
+                            .ConfigureAwait(true);
+                    }
+                    else
+                    {
+                        TraceLogger.Write("  Calling model (essayLen=" + essay.Length + ")");
+                        grade = await _gemini
+                            .GradeAsync(name, criteriaText, essay, apiKey, model, cts.Token)
+                            .ConfigureAwait(true);
+                    }
 
                     results.Add(grade);
                     TraceLogger.Write("  Graded OK: hopLe=" + grade.HopLe + " tong=" + (grade.TongDiem.HasValue ? grade.TongDiem.Value.ToString("0.#") : "null"));
