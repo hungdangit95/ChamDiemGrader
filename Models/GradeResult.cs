@@ -7,9 +7,9 @@ public sealed class GradeResult
     public required bool HopLe { get; init; }
     public string? LyDoKhongHopLe { get; init; }
     public double? TongDiem { get; init; }
-    /// <summary>Tổng phần Nội dung (tối đa 6).</summary>
+    /// <summary>Tổng phần Nội dung (tối đa 8).</summary>
     public double? DiemNoiDung { get; init; }
-    /// <summary>Tổng phần Hình thức (tối đa 4).</summary>
+    /// <summary>Tổng phần Hình thức (tối đa 2).</summary>
     public double? DiemHinhThuc { get; init; }
     public string? PhanLoai { get; init; }
     public string? GhiChu { get; init; }

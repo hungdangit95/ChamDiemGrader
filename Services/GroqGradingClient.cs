@@ -334,19 +334,20 @@ public sealed class GeminiGradingClient : IDisposable
         if (!grading.HopLe)
             return (null, null, null, null);
 
-        // Backward-compatible: nếu model cũ vẫn trả chi_tiet thì vẫn đọc được.
         if (grading.ChiTiet is { Length: > 0 })
         {
             var (sumNd, sumHt) = SumNdHt(grading.ChiTiet);
-            return (sumNd, sumHt, sumNd + sumHt, null);
+            var tong = sumNd + sumHt;
+            var chiTiet = FormatChiTiet(grading.ChiTiet);
+            return (sumNd, sumHt, tong, chiTiet);
         }
 
-        var nd = ClampNullable(grading.DiemNoiDung, 0, 6);
-        var ht = ClampNullable(grading.DiemHinhThuc, 0, 4);
-        var tong = nd.HasValue && ht.HasValue
+        var nd = ClampNullable(grading.DiemNoiDung, 0, 8);
+        var ht = ClampNullable(grading.DiemHinhThuc, 0, 2);
+        var tongFallback = nd.HasValue && ht.HasValue
             ? nd.Value + ht.Value
             : ClampNullable(grading.TongDiem, 0, 10);
-        return (nd, ht, tong, null);
+        return (nd, ht, tongFallback, null);
     }
 
     private static double? ClampNullable(double? v, double min, double max)
@@ -360,7 +361,7 @@ public sealed class GeminiGradingClient : IDisposable
     {
         var basePart = string.IsNullOrWhiteSpace(baseComment) ? null : baseComment.Trim();
         var detailPart = string.IsNullOrWhiteSpace(highScoreDetail) ? null : highScoreDetail.Trim();
-        var isHighScore = tongDiem.HasValue && tongDiem.Value >= 8.5;
+        var isHighScore = tongDiem.HasValue && tongDiem.Value >= 8.0;
 
         if (!isHighScore)
             return basePart;
@@ -392,23 +393,23 @@ public sealed class GeminiGradingClient : IDisposable
         if (string.IsNullOrWhiteSpace(ma)) return Array.Empty<double>();
 
         if (Regex.IsMatch(ma, @"^(I\.?|1\.)(1)$", RegexOptions.IgnoreCase))
-            return new[] { 0.0, 0.5, 1.0, 1.5, 2.0 };
+            return new[] { 0.0, 0.5, 1.0, 1.5, 2.0 };   // max 2.0
         if (Regex.IsMatch(ma, @"^(I\.?|1\.)(2)$", RegexOptions.IgnoreCase))
-            return new[] { 0.0, 0.25, 0.5, 0.75, 1.0 };
+            return new[] { 0.0, 0.5, 1.0, 1.5, 2.0 };   // max 2.0 (tăng từ 1.0)
         if (Regex.IsMatch(ma, @"^(I\.?|1\.)(3)$", RegexOptions.IgnoreCase))
-            return new[] { 0.0, 0.5, 1.0, 1.25, 1.5 };
+            return new[] { 0.0, 0.5, 1.0, 1.25, 1.5 };  // max 1.5
         if (Regex.IsMatch(ma, @"^(I\.?|1\.)(4)$", RegexOptions.IgnoreCase))
-            return new[] { 0.0, 0.25, 0.5, 0.75, 1.0 };
+            return new[] { 0.0, 0.5, 1.0, 1.5, 2.0 };   // max 2.0 (tăng từ 1.0)
         if (Regex.IsMatch(ma, @"^(I\.?|1\.)(5)$", RegexOptions.IgnoreCase))
-            return new[] { 0.0, 0.25, 0.5 };
+            return new[] { 0.0, 0.25, 0.5 };             // max 0.5
         if (Regex.IsMatch(ma, @"^(II\.?|2\.)(1)$", RegexOptions.IgnoreCase))
-            return new[] { 0.0, 0.5, 1.0, 1.25, 1.5 };
+            return new[] { 0.0, 0.25, 0.5 };             // max 0.5 (giảm từ 1.5)
         if (Regex.IsMatch(ma, @"^(II\.?|2\.)(2)$", RegexOptions.IgnoreCase))
-            return new[] { 0.0, 0.25, 0.5, 0.75, 1.0 };
+            return new[] { 0.0, 0.25, 0.5 };             // max 0.5 (giảm từ 1.0)
         if (Regex.IsMatch(ma, @"^(II\.?|2\.)(3)$", RegexOptions.IgnoreCase))
-            return new[] { 0.0, 0.25, 0.5 };
+            return new[] { 0.0, 0.25, 0.5 };             // max 0.5
         if (Regex.IsMatch(ma, @"^(II\.?|2\.)(4)$", RegexOptions.IgnoreCase))
-            return new[] { 0.0, 1.0 };
+            return new[] { 0.0, 0.5 };                   // max 0.5, binary (giảm từ 1.0)
 
         return Array.Empty<double>();
     }
@@ -465,7 +466,6 @@ public sealed class GeminiGradingClient : IDisposable
         if (string.IsNullOrWhiteSpace(ma))
             return 0;
 
-        // Supports both "I.1".."I.5" and "1.1".."1.5", likewise for II.
         var mNd = Regex.Match(ma, @"^(I\.?|1\.)([1-5])", RegexOptions.IgnoreCase);
         if (mNd.Success)
         {
@@ -473,9 +473,9 @@ public sealed class GeminiGradingClient : IDisposable
             return idx switch
             {
                 1 => 2.0,   // I.1 max 2
-                2 => 1.0,   // I.2 max 1
+                2 => 2.0,   // I.2 max 2 (tăng từ 1)
                 3 => 1.5,   // I.3 max 1.5
-                4 => 1.0,   // I.4 max 1
+                4 => 2.0,   // I.4 max 2 (tăng từ 1)
                 5 => 0.5,   // I.5 max 0.5
                 _ => 0
             };
@@ -487,10 +487,10 @@ public sealed class GeminiGradingClient : IDisposable
             var idx = int.Parse(mHt.Groups[2].Value);
             return idx switch
             {
-                1 => 1.5,   // II.1 max 1.5
-                2 => 1.0,   // II.2 max 1
+                1 => 0.5,   // II.1 max 0.5 (giảm từ 1.5)
+                2 => 0.5,   // II.2 max 0.5 (giảm từ 1)
                 3 => 0.5,   // II.3 max 0.5
-                4 => 1.0,   // II.4 max 1
+                4 => 0.5,   // II.4 max 0.5 (giảm từ 1)
                 _ => 0
             };
         }
@@ -780,18 +780,18 @@ public sealed class GeminiGradingClient : IDisposable
   "hop_le": <boolean>,
   "ly_do_neu_khong_hop_le": <string hoặc null>,
   "tong_diem": <tổng = sum(chi_tiet.diem_cham), 0–10, null nếu không hợp lệ>,
-  "diem_noi_dung": <tổng I.1…I.5 từ chi_tiet, tối đa 6, null nếu không hợp lệ>,
-  "diem_hinh_thuc": <tổng II.1…II.4 từ chi_tiet, tối đa 4, null nếu không hợp lệ>,
+  "diem_noi_dung": <tong I.1...I.5 tu chi_tiet, toi da 8, null neu khong hop le>,
+  "diem_hinh_thuc": <tong II.1...II.4 tu chi_tiet, toi da 2, null neu khong hop le>,
   "chi_tiet": [
     {"ma":"I.1","diem_toi_da":2.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn ngắn trực tiếp từ bài>"},
-    {"ma":"I.2","diem_toi_da":1.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"I.2","diem_toi_da":2.0,"diem_cham":<bac hop le>,"ly_do":"<trich dan>"},
     {"ma":"I.3","diem_toi_da":1.5,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
-    {"ma":"I.4","diem_toi_da":1.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"I.4","diem_toi_da":2.0,"diem_cham":<bac hop le>,"ly_do":"<trich dan>"},
     {"ma":"I.5","diem_toi_da":0.5,"diem_cham":<0|0.25|0.5>,"ly_do":"<trích dẫn hoặc null nếu 0>"},
-    {"ma":"II.1","diem_toi_da":1.5,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
-    {"ma":"II.2","diem_toi_da":1.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"II.1","diem_toi_da":0.5,"diem_cham":<0|0.25|0.5>,"ly_do":"<trich dan>"},
+    {"ma":"II.2","diem_toi_da":0.5,"diem_cham":<0|0.25|0.5>,"ly_do":"<trich dan>"},
     {"ma":"II.3","diem_toi_da":0.5,"diem_cham":<0|0.25|0.5>,"ly_do":"<mô tả bố cục>"},
-    {"ma":"II.4","diem_toi_da":1.0,"diem_cham":<0|1.0>,"ly_do":"<trích nguyên văn thông điệp + số từ đếm được>"}
+    {"ma":"II.4","diem_toi_da":0.5,"diem_cham":<0|0.5>,"ly_do":"<trich nguyen van thong diep + so tu dem duoc>"}
   ],
   "ten_tac_gia_tac_pham": <string: ví dụ "Nguyễn Văn A (Tựa bài)" hoặc chỉ tựa — phục vụ bảng tổng hợp>,
   "phan_loai": <một trong: "Trung binh"|"Kha"|"Gioi"|null>,
@@ -802,18 +802,18 @@ public sealed class GeminiGradingClient : IDisposable
 }
 
 Thứ tự và mã BẮT BUỘC khi hop_le=true (Bước 2 — thang 10 điểm):
-I. NỘI DUNG (tối đa 6):
+I. NOI DUNG (toi da 8):
   "I.1" điểm tối đa 2 — Bám chủ đề (một hoặc nhiều chủ đề: kỷ niệm bữa cơm; hương vị nhà; bữa cơm hàn gắn thế hệ; giáo dục từ bàn ăn; góc nhìn hiện đại/truyền thống).
-  "I.2" tối đa 1 — Chất lượng kể chuyện (cụ thể, sâu, thuyết phục).
+  "I.2" toi da 2 -- Bai viet co cau chuyen, ky niem cu the, sau sac, thuyet phuc.
   "I.3" tối đa 1.5 — Cảm xúc chân thành, tích cực, truyền cảm hứng.
-  "I.4" tối đa 1 — Giá trị gia đình (gắn kết, yêu thương, chia sẻ, giáo dục).
+  "I.4" toi da 2 -- The hien gia tri gia dinh qua bua com (gan ket, giao duc, yeu thuong, chia se,...).
   "I.5" tối đa 0.5 — Ý nghĩa/bài học tích cực về giá trị bữa cơm gia đình.
 
-II. HÌNH THỨC (tối đa 4):
-  "II.1" tối đa 1.5 — Ngôn ngữ mạch lạc, dễ hiểu, ít lỗi chính tả.
-  "II.2" tối đa 1 — Phong cách viết, biện pháp tu từ/hình ảnh có hiệu quả.
-  "II.3" tối đa 0.5 — Bố cục rõ ràng, logic.
-  "II.4" tối đa 1 — Có phần thông điệp rõ ràng KHÔNG QUÁ 30 TỪ (đếm theo quy tắc từ tiếng Việt: tách theo khoảng trắng). Nếu thiếu phần thông điệp hoặc >30 từ thì cho 0 điểm hạng mục này và ghi rõ trong ly_do/nhan_xet_noi_bat.
+II. HINH THUC (toi da 2):
+  "II.1" toi da 0.5 -- Cau van mach lac, chan that, ngan gon, de hieu; it loi chinh ta.
+  "II.2" toi da 0.5 -- Van phong muot, co nhieu hinh anh, dep, cam xuc; su dung cac bien phap tu tu, nghe thuat hop ly, hieu qua.
+  "II.3" toi da 0.5 -- Co bo cuc hop ly, ro rang.
+  "II.4" toi da 0.5 -- Co thong diep (KHONG QUA 30 TU). Neu khong co hoac >30 tu thi cho 0 diem; neu hop le thi 0.5. Ghi ro so tu dem duoc trong ly_do.
 
 Tiêu chí phụ (không cộng điểm, chỉ ghi nhận trong ly_do nếu cần): chữ viết tay đẹp; video/ảnh minh họa.
 """;
@@ -843,18 +843,18 @@ Phân phối kỳ vọng thực tế (phần lớn bài dự thi sẽ rơi vào 
 
 Bậc điểm cho phép của từng mục (chỉ dùng đúng các mốc này, không làm tròn trung gian):
   I.1 (tối đa 2.0): 0 / 0.5 / 1.0 / 1.5 / 2.0
-  I.2 (tối đa 1.0): 0 / 0.25 / 0.5 / 0.75 / 1.0
+  I.2 (toi da 2.0): 0 / 0.5 / 1.0 / 1.5 / 2.0
   I.3 (tối đa 1.5): 0 / 0.5 / 1.0 / 1.25 / 1.5
-  I.4 (tối đa 1.0): 0 / 0.25 / 0.5 / 0.75 / 1.0
+  I.4 (toi da 2.0): 0 / 0.5 / 1.0 / 1.5 / 2.0
   I.5 (tối đa 0.5): 0 / 0.25 / 0.5
-  II.1 (tối đa 1.5): 0 / 0.5 / 1.0 / 1.25 / 1.5
-  II.2 (tối đa 1.0): 0 / 0.25 / 0.5 / 0.75 / 1.0
+  II.1 (toi da 0.5): 0 / 0.25 / 0.5
+  II.2 (toi da 0.5): 0 / 0.25 / 0.5
   II.3 (tối đa 0.5): 0 / 0.25 / 0.5
-  II.4 (tối đa 1.0): 0 / 1.0  (chỉ 2 mức: không đạt = 0, đạt đủ điều kiện = 1.0)
+  II.4 (toi da 0.5): 0 / 0.5  (chi 2 muc: khong dat = 0, dat du dieu kien = 0.5)
 
 Mức "trung bình điển hình" cho bài bình thường (ĐIỂM NÉO DƯỚI — bài bình thường không được vượt quá mức này nếu không có lý do thuyết phục):
-  I.1=0.5  I.2=0.25  I.3=0.5  I.4=0.25  I.5=0  → diem_noi_dung ≈ 1.5
-  II.1=1.0  II.2=0.25  II.3=0.25  II.4=0  → diem_hinh_thuc ≈ 1.5
+  I.1=0.5  I.2=0.5  I.3=0.5  I.4=0.5  I.5=0  --> diem_noi_dung ~ 2.0
+  II.1=0.25  II.2=0  II.3=0.25  II.4=0  --> diem_hinh_thuc ~ 0.5
   Bài phải VƯỢT RÕ RỆT và CÓ BẰNG CHỨNG CỤ THỂ mới được chấm cao hơn mức này.
 
 Quy tắc CHẤM NGHIÊM KHẮC cho cuộc thi nhận giải:
@@ -865,11 +865,9 @@ Quy tắc CHẤM NGHIÊM KHẮC cho cuộc thi nhận giải:
 - I.1: bài chỉ kể chuyện bữa cơm đơn giản, không có chiều sâu → tối đa 0.5. Phải có sáng tạo/góc nhìn độc đáo mới lên 1.5–2.0.
 - I.3: cảm xúc phải CHÂN THỰC, không hoa mỹ rỗng. Văn hoa nhưng thiếu cảm xúc thật → tối đa 0.5.
 - I.5 và II.4: chỉ chấm >0 khi bài học/thông điệp TÁCH BIỆT rõ khỏi phần kể, không lẫn vào nội dung.
-- II.1: trừ điểm mạnh tay cho lỗi chính tả, diễn đạt vòng vo, câu thiếu chủ/vị. Mức 1.25–1.5 chỉ dành bài viết gần như không lỗi.
-- II.2: tu từ/hình ảnh phải CÓ HIỆU QUẢ THỰC SỰ, không chỉ sử dụng cho có. Mức 0.75–1.0 rất hiếm.
-- II.3: bài không chia đoạn rõ hoặc ý lộn xộn → tối đa 0.25.
-- II.4: chỉ 2 mức: 0 (không có thông điệp rõ hoặc >30 từ) hoặc 1.0 (đúng định dạng, ≤30 từ).
-- Chứng cứ yếu/mơ hồ → chấm bậc thấp hơn, không đoán.
+- II.1: trừ điểm mạnh tay cho lỗi chính tả, diễn đạt vòng vo, câu thiếu chủ/vị. Mức 0.5 chỉ dành bài viết gần như không lỗi.
+- II.2: tu tu/hinh anh phai CO HIEU QUA THUC SU, khong chi su dung cho co. Muc 0.5 rat hiem.
+- II.4: chỉ 2 mức: 0 (không có thông điệp rõ hoặc >30 từ) hoặc 0.5 (đúng định dạng, ≤30 từ).
 
 Trả về ĐÚNG một đối tượng JSON (không thêm khóa ngoài schema). Ví dụ cấu trúc:
 {jsonShape}
@@ -890,18 +888,18 @@ Nội dung bài dự thi:
   "hop_le": <boolean>,
   "ly_do_neu_khong_hop_le": <string hoặc null>,
   "tong_diem": <tổng = sum(chi_tiet.diem_cham), 0–10, null nếu không hợp lệ>,
-  "diem_noi_dung": <tổng I.1…I.5 từ chi_tiet, tối đa 6, null nếu không hợp lệ>,
-  "diem_hinh_thuc": <tổng II.1…II.4 từ chi_tiet, tối đa 4, null nếu không hợp lệ>,
+  "diem_noi_dung": <tong I.1...I.5 tu chi_tiet, toi da 8, null neu khong hop le>,
+  "diem_hinh_thuc": <tong II.1...II.4 tu chi_tiet, toi da 2, null neu khong hop le>,
   "chi_tiet": [
     {"ma":"I.1","diem_toi_da":2.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn ngắn từ bài>"},
-    {"ma":"I.2","diem_toi_da":1.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"I.2","diem_toi_da":2.0,"diem_cham":<bac hop le>,"ly_do":"<trich dan>"},
     {"ma":"I.3","diem_toi_da":1.5,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
-    {"ma":"I.4","diem_toi_da":1.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"I.4","diem_toi_da":2.0,"diem_cham":<bac hop le>,"ly_do":"<trich dan>"},
     {"ma":"I.5","diem_toi_da":0.5,"diem_cham":<0|0.25|0.5>,"ly_do":"<trích dẫn hoặc null nếu 0>"},
-    {"ma":"II.1","diem_toi_da":1.5,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
-    {"ma":"II.2","diem_toi_da":1.0,"diem_cham":<bậc hợp lệ>,"ly_do":"<trích dẫn>"},
+    {"ma":"II.1","diem_toi_da":0.5,"diem_cham":<0|0.25|0.5>,"ly_do":"<trich dan>"},
+    {"ma":"II.2","diem_toi_da":0.5,"diem_cham":<0|0.25|0.5>,"ly_do":"<trich dan>"},
     {"ma":"II.3","diem_toi_da":0.5,"diem_cham":<0|0.25|0.5>,"ly_do":"<mô tả bố cục>"},
-    {"ma":"II.4","diem_toi_da":1.0,"diem_cham":<0|1.0>,"ly_do":"<trích nguyên văn thông điệp + số từ đếm được>"}
+    {"ma":"II.4","diem_toi_da":0.5,"diem_cham":<0|0.5>,"ly_do":"<trich nguyen van thong diep + so tu dem duoc>"}
   ],
   "ten_tac_gia_tac_pham": <string: ví dụ "Nguyễn Văn A (Tựa bài)" hoặc chỉ tựa — phục vụ bảng tổng hợp>,
   "phan_loai": <một trong: "Trung binh"|"Kha"|"Gioi"|null>,
@@ -930,17 +928,17 @@ Phân phối kỳ vọng thực tế (phần lớn bài dự thi sẽ rơi vào 
 
 Bậc điểm cho phép của từng mục (chỉ dùng ĐÚNG CÁC MỐC NÀY — không được dùng giá trị trung gian):
   I.1 (tối đa 2.0): 0 / 0.5 / 1.0 / 1.5 / 2.0
-  I.2 (tối đa 1.0): 0 / 0.25 / 0.5 / 0.75 / 1.0
+  I.2 (toi da 2.0): 0 / 0.5 / 1.0 / 1.5 / 2.0
   I.3 (tối đa 1.5): 0 / 0.5 / 1.0 / 1.25 / 1.5
-  I.4 (tối đa 1.0): 0 / 0.25 / 0.5 / 0.75 / 1.0
+  I.4 (toi da 2.0): 0 / 0.5 / 1.0 / 1.5 / 2.0
   I.5 (tối đa 0.5): 0 / 0.25 / 0.5
-  II.1 (tối đa 1.5): 0 / 0.5 / 1.0 / 1.25 / 1.5
-  II.2 (tối đa 1.0): 0 / 0.25 / 0.5 / 0.75 / 1.0
+  II.1 (toi da 0.5): 0 / 0.25 / 0.5
+  II.2 (toi da 0.5): 0 / 0.25 / 0.5
   II.3 (tối đa 0.5): 0 / 0.25 / 0.5
-  II.4 (tối đa 1.0): 0 hoặc 1.0 (chỉ 2 mức — không được dùng giá trị khác)
+  II.4 (toi da 0.5): 0 / 0.5  (chi 2 muc: 0 hoac 0.5)
 
 Mức "trung bình điển hình" (ĐIỂM NÉO DƯỚI — không vượt nếu không có lý do thuyết phục):
-  I.1=0.5  I.2=0.25  I.3=0.5  I.4=0.25  I.5=0  | II.1=1.0  II.2=0.25  II.3=0.25  II.4=0
+  I.1=0.5  I.2=0.5  I.3=0.5  I.4=0.5  I.5=0  | II.1=0.25  II.2=0  II.3=0.25  II.4=0
   Bài phải VƯỢT RÕ RỆT và CÓ BẰNG CHỨNG CỤ THỂ mới được chấm cao hơn mức này.
 
 Yêu cầu:

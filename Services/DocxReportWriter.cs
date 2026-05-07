@@ -120,13 +120,13 @@ public static class DocxReportWriter
             JustificationValues.Left);
 
         yield return ParaBullet(
-            "Nội dung (tối đa 6 điểm): I.1 Bám chủ đề (tối đa 2); I.2 Chất lượng kể chuyện (tối đa 1); " +
-            "I.3 Cảm xúc chân thành, tích cực (tối đa 1,5); I.4 Giá trị gia đình (tối đa 1); " +
+            "Nội dung (tối đa 8 điểm): I.1 Bám chủ đề (tối đa 2); I.2 Chất lượng kể chuyện (tối đa 2); " +
+            "I.3 Cảm xúc chân thành, tích cực (tối đa 1,5); I.4 Giá trị gia đình (tối đa 2); " +
             "I.5 Ý nghĩa/bài học (tối đa 0,5).");
 
         yield return ParaBullet(
-            "Hình thức (tối đa 4 điểm): II.1 Ngôn ngữ (tối đa 1,5); II.2 Phong cách, tu từ (tối đa 1); " +
-            "II.3 Bố cục (tối đa 0,5); II.4 Phần thông điệp không quá 30 từ (tối đa 1). " +
+            "Hình thức (tối đa 2 điểm): II.1 Ngôn ngữ (tối đa 0,5); II.2 Phong cách, tu từ (tối đa 0,5); " +
+            "II.3 Bố cục (tối đa 0,5); II.4 Phần thông điệp không quá 30 từ (tối đa 0,5). " +
             "Nếu thiếu thông điệp hoặc quá 30 từ thì không được điểm hạng mục II.4.");
 
         yield return ParaMixed(
@@ -138,7 +138,7 @@ public static class DocxReportWriter
 
         yield return ParaMixed(
             new[] { ("Lưu ý quan trọng: ", false, false), ("Phần thông điệp (≤30 từ) là một phần của thang hình thức; ", false, true),
-                ("nếu không đạt, điểm hình thức sẽ phản ánh việc trừ toàn bộ 1 điểm tại II.4.", false, true) },
+                ("nếu không đạt, điểm hình thức sẽ phản ánh việc trừ toàn bộ 0,5 điểm tại II.4.", false, true) },
             JustificationValues.Both);
     }
 
@@ -188,8 +188,8 @@ public static class DocxReportWriter
         header.AppendChild(MakeHeaderCell("Xếp hạng", 900));
         header.AppendChild(MakeHeaderCell("Mã Tệp", 900));
         header.AppendChild(MakeHeaderCell("Tên Tác giả / Tác phẩm tiêu biểu", 3200));
-        header.AppendChild(MakeHeaderCell("Điểm Nội dung\n(Max 6)", 900));
-        header.AppendChild(MakeHeaderCell("Điểm Hình thức\n(Max 4)", 900));
+        header.AppendChild(MakeHeaderCell("Điểm Nội dung\n(Max 8)", 900));
+        header.AppendChild(MakeHeaderCell("Điểm Hình thức\n(Max 2)", 900));
         header.AppendChild(MakeHeaderCell("Tổng điểm\n(10)", 900));
         header.AppendChild(MakeHeaderCell("Nhận xét nổi bật", 3400));
         table.AppendChild(header);

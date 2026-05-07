@@ -14,13 +14,13 @@ public static class ExcelReportWriter
         var summary = wb.Worksheets.Add("TomTat");
         summary.Cell(1, 1).Value = "Tên file";
         summary.Cell(1, 2).Value = "Hợp lệ";
-        summary.Cell(1, 3).Value = "Điểm ND (6)";
-        summary.Cell(1, 4).Value = "Điểm HT (4)";
+        summary.Cell(1, 3).Value = "Điểm ND (8)";
+        summary.Cell(1, 4).Value = "Điểm HT (2)";
         summary.Cell(1, 5).Value = "Tổng (10)";
         summary.Cell(1, 6).Value = "Tác giả / Tác phẩm";
         summary.Cell(1, 7).Value = "Nhận xét nổi bật";
-        summary.Cell(1, 8).Value = "Chi tiết chấm (I.1–II.4)";
-        summary.Cell(1, 9).Value = "Nhận xét chi tiết (>8.5)";
+        summary.Cell(1, 8).Value = "Chi tiết điểm từng mục";
+        summary.Cell(1, 9).Value = "Nhận xét chi tiết (≥8đ)";
         summary.Range(1, 1, 1, 9).Style.Font.Bold = true;
 
         var r = 2;
